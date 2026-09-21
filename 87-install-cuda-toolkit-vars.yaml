@@ -1,0 +1,22 @@
+---
+# 用法：
+#   1. 确认 Ubuntu 22.04/24.04 x86_64、GPU 驱动和应用支持 CUDA 13.4；设 cuda_toolkit_enabled: true。
+#   2. 核对 cuda-keyring 下载地址；85 已注册同版本网络仓库时会直接复用。
+#   3. ansible-playbook -i hosts.ini 87-install-cuda-toolkit.yaml --list-hosts
+#   4. ansible-playbook -i hosts.ini 87-install-cuda-toolkit.yaml --limit node1 --check --diff
+#   5. ansible-playbook -i hosts.ini 87-install-cuda-toolkit.yaml --limit node1
+#   6. 重新登录或 source /etc/profile.d/ansible-cuda-toolkit.sh 后使用 nvcc --version。
+# dry-run 只比较本机包和配置，不下载 keyring 包、不刷新 APT、不模拟依赖解析。
+# 仅运行自带 CUDA 的容器时，宿主机一般无需安装此 Toolkit。
+cuda_toolkit_enabled: true  # 设为 true 才执行
+cuda_toolkit_hosts: servers  # 目标主机组或主机名
+cuda_toolkit_version: "13.4"  # CUDA 主次版本，默认安装 cuda-toolkit-13-4
+cuda_toolkit_package_version: ""  # 可选完整 APT 包版本；留空不主动更新已安装包
+# 更改 keyring 下载地址只改变 deb 的来源，不改变 deb 内注册的 NVIDIA APT 源。
+cuda_toolkit_keyring_version: "1.1-1"  # CUDA 网络仓库注册包版本
+cuda_toolkit_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/{{ cuda_toolkit_distro }}/x86_64/cuda-keyring_{{ cuda_toolkit_keyring_version }}_all.deb"  # 按目标 Ubuntu 生成 keyring 包地址
+cuda_toolkit_keyring_sha256:  # 官方 1.1-1 安装包 SHA256；更换版本需同步更新
+  ubuntu2204: "d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df"  # Ubuntu 22.04 安装包
+  ubuntu2404: "d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba"  # Ubuntu 24.04 安装包
+cuda_toolkit_cache_dir: /opt/nvidia-driver  # 与 85 共用 keyring 包缓存目录
+cuda_toolkit_apt_cache_valid_time: 3600  # APT 索引有效期，单位秒；新注册仓库时强制刷新

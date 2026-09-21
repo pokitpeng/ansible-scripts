@@ -32,6 +32,8 @@
 | 60（按需） | `60-sysctl.yaml` | 写入需要的内核参数；只配置本机实际需要的参数。 |
 | 70（按需） | `70-disable-auto-updates.yaml` | 仅在已有其他更新维护方式时关闭 APT、固件刷新、系统维护及更新通知单元；不存在的单元会跳过。 |
 | 80（按需） | `80-init-nvme-disks.yaml` | 确认盘符和数据后初始化、挂载空 NVMe 盘；需要 `ansible.posix` 集合。若 Docker 的 `data-root` 在此盘上，必须先完成挂载。 |
+| 85（按需） | `85-install-nvidia-driver.yaml` | Ubuntu 22.04/24.04 x86_64 通过 cuda-keyring 注册 NVIDIA 网络源，锁定 615 分支并安装 nvidia-open；安装有改动后手动重启。 |
+| 87（按需） | `87-install-cuda-toolkit.yaml` | Ubuntu 22.04/24.04 x86_64 通过 cuda-keyring 网络源安装 CUDA Toolkit 13.4（可配置），设置登录 shell 的 CUDA_HOME/PATH；需要在宿主机编译 CUDA 时执行。 |
 | 90（按需） | `90-install-docker.yaml` | 安装静态 Docker 26.1.4，配置 daemon 和 systemd 服务；确认下载源与数据目录。 |
 | 91（按需） | `91-install-nvidia-container-toolkit.yaml` | Ubuntu/Debian 上从 Gitee 安装 NVIDIA Container Toolkit 1.20.1；确认对应架构压缩包已同步。 |
 | 92（按需） | `92-configure-nvidia-runtime.yaml` | Docker 和 NVIDIA Container Toolkit 就绪后，注册 NVIDIA runtime 并按需设为默认。 |
@@ -47,6 +49,30 @@ ansible-galaxy collection install ansible.posix
 ```
 
 密码建议放在 Ansible Vault 加密的变量文件中，并通过 `-e @/path/to/secret-vars.yaml --ask-vault-pass` 传入；不要把密码写进命令行、`hosts.ini` 或提交到仓库。`20-set-root-password-vars.yaml` 的密码默认为空，所有修改型 playbook 默认关闭。
+
+## NVIDIA 驱动与 CUDA
+
+GPU 主机建议按 `85 驱动 → 手动重启并验证 → 87 CUDA（按需）→ 90 Docker → 91 Container Toolkit → 92 runtime` 执行。仅运行自带 CUDA 的容器时，宿主机通常可跳过 `87`。`nvidia-smi` 显示的 CUDA Version 是驱动支持的 CUDA 版本信息，不能用来判断宿主机是否安装了 CUDA Toolkit；Toolkit 使用 `nvcc --version` 检查。
+
+`85-install-nvidia-driver-vars.yaml` 按 NVIDIA 官方 `deb (network)` 流程安装：下载并校验 `cuda-keyring_1.1-1_all.deb`，用 `dpkg` 注册签名密钥和网络源，刷新 APT 索引，先安装 `nvidia-driver-pinning-615`，再安装 `nvidia-open`。仓库地址按目标 Ubuntu 版本选择 `ubuntu2204/x86_64` 或 `ubuntu2404/x86_64`。驱动分支由 `nvidia_driver_branch` 控制，默认 `615`；开放内核模块使用 `nvidia-open`，需要闭源模块时可按 GPU 支持情况改成 `cuda-drivers`。分支锁定包与安装版本约束共同限制驱动分支，分支内具体修订版由 APT 选择。这个 keyring 包只注册网络仓库，驱动和系统依赖在后续安装时下载。
+
+`85` 检查 keyring 包版本、源文件、签名文件和源优先级文件，已满足时跳过下载和 `dpkg`；缺失时重新安装以修复。更换分支时若旧的锁定包冲突，需先处理旧锁定包；脚本不自动删除已有包。替换 keyring 的下载地址不会改变包内注册的 NVIDIA APT 源。脚本不执行自动重启；驱动安装发生变化时提示手动重启，重启后再次执行会验证 `nvidia-smi` 返回的所有 GPU 驱动均属于目标分支。默认安装并启用 `nvidia-persistenced`，用 systemd drop-in 去掉 Ubuntu 包自带的 `--no-persistence-mode`，驱动可用时确认 `persistence_mode` 为 Enabled。Secure Boot 开启时可能需要通过控制台注册 MOK。
+
+`87-install-cuda-toolkit-vars.yaml` 默认 CUDA 版本为 `13.4`，按官方 `deb (network)` 流程：下载并校验 `cuda-keyring_1.1-1_all.deb`，用 `dpkg` 注册网络仓库，刷新 APT 索引，再安装 `cuda-toolkit-13-4`。支持 Ubuntu 22.04/24.04 x86_64。若 `85` 已安装同版本 keyring 且仓库文件完整，直接复用；两者共用 keyring 缓存文件，不重复写入源配置。`cuda_toolkit_version` 可指定其他主次版本，所选版本需支持目标 Ubuntu、宿主编译器和 GPU 驱动。该包提供编译器和开发库；驱动由 `85` 单独安装。修改 keyring 下载 URL 不会改变包内的 NVIDIA APT 源。
+
+`87` 设置登录 shell 的 `CUDA_HOME` 和 `PATH`，安装后检查 `/usr/local/cuda-13.4/bin/nvcc --version`；更换 CUDA 版本时路径自动调整。重新登录或执行 `source /etc/profile.d/ansible-cuda-toolkit.sh` 后生效。
+
+`85`、`87` 默认关闭；`85` 使用上述明确分支，`87` 默认使用 CUDA 13.4，运行前需核对 GPU 适配情况。两者检查已有 runfile 安装，发现冲突时停止；不自动卸载旧驱动或 Toolkit。APT 不允许自动降级或删除已有包。`--check --diff` 读取包状态并预览计划，`87` 同时预览环境文件；不会下载、刷新索引、安装或重启，因此不能验证仓库可达性、实际依赖解析或 GPU 兼容性。安装后 `85` 检查 `nvidia-smi`，`87` 检查指定路径的 `nvcc`；这不替代真实 CUDA 工作负载验证。
+
+```bash
+ansible-playbook -i hosts.ini 85-install-nvidia-driver.yaml --limit node1 --check --diff
+ansible-playbook -i hosts.ini 85-install-nvidia-driver.yaml --limit node1
+# 在维护时间手动重启目标机器，再执行 85 验证驱动。
+ansible-playbook -i hosts.ini 87-install-cuda-toolkit.yaml --limit node1 --check --diff
+ansible-playbook -i hosts.ini 87-install-cuda-toolkit.yaml --limit node1
+```
+
+安装流程参考 [Ubuntu 驱动安装文档](https://ubuntu.com/server/docs/how-to/graphics/install-nvidia-drivers/)、[NVIDIA APT 仓库配置](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/ubuntu.html) 和 [CUDA Linux 安装指南](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)。
 
 ## Docker 与 Buildx
 

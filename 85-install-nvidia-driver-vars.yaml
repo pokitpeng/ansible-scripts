@@ -1,0 +1,24 @@
+---
+# 用法：
+#   1. 确认 Ubuntu 22.04/24.04 x86_64、GPU 支持目标驱动分支，核对分支和开放/闭源模块。
+#   2. 设 nvidia_driver_enabled: true，先 --list-hosts，再预览：
+#      ansible-playbook -i hosts.ini 85-install-nvidia-driver.yaml --limit node1 --check --diff
+#   3. ansible-playbook -i hosts.ini 85-install-nvidia-driver.yaml --limit node1
+#   4. 安装有改动时手动重启；重启后再次执行本脚本，用 nvidia-smi 验证分支和持久模式。
+# 流程：安装 cuda-keyring → apt update → 安装分支锁定包 → 安装 nvidia-open。
+# 更改 keyring 下载地址只改变该 deb 的来源；deb 内注册的 APT 源仍是 NVIDIA 官方源。
+# 更换分支时，如果已安装其他分支锁定包导致冲突，请先处理旧锁定包。
+# dry-run 只读取包和文件状态，不下载、不写文件、不刷新索引、不解析依赖或验证 GPU 兼容性。
+# Secure Boot 开启时，可能需要重启后在控制台完成 MOK 注册。
+nvidia_driver_enabled: true  # 设为 true 才执行
+nvidia_driver_hosts: servers  # 目标主机组或主机名
+nvidia_driver_branch: "615"  # 驱动分支，对应 nvidia-driver-pinning-615
+nvidia_driver_package: nvidia-open  # 官方驱动元包；开放内核模块用 nvidia-open，闭源用 cuda-drivers，按硬件支持选择
+nvidia_driver_keyring_version: "1.1-1"  # CUDA 网络仓库注册包版本
+nvidia_driver_keyring_url: "https://developer.download.nvidia.com/compute/cuda/repos/{{ nvidia_driver_distro }}/x86_64/cuda-keyring_{{ nvidia_driver_keyring_version }}_all.deb"  # 按目标 Ubuntu 生成 keyring 包地址
+nvidia_driver_keyring_sha256:  # 官方 1.1-1 安装包 SHA256；更换版本需同步更新
+  ubuntu2204: "d93190d50b98ad4699ff40f4f7af50f16a76dac3bb8da1eaaf366d47898ff8df"  # Ubuntu 22.04 安装包
+  ubuntu2404: "d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba"  # Ubuntu 24.04 安装包
+nvidia_driver_cache_dir: /opt/nvidia-driver  # keyring 安装包缓存目录
+nvidia_driver_apt_cache_valid_time: 3600  # APT 索引有效期，单位秒；新注册仓库时强制刷新
+nvidia_driver_persistence: true  # 用 nvidia-persistenced 开启持久模式；Ubuntu 默认带 --no-persistence-mode

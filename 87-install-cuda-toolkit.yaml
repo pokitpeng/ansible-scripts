@@ -1,0 +1,167 @@
+---
+# 配置与用法见 87-install-cuda-toolkit-vars.yaml
+
+- name: 安装 CUDA Toolkit
+  hosts: "{{ cuda_toolkit_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 87-install-cuda-toolkit-vars.yaml
+  vars:
+    cuda_toolkit_package: "cuda-toolkit-{{ cuda_toolkit_version | replace('.', '-') }}"
+    cuda_toolkit_spec: "{{ cuda_toolkit_package ~ ('=' ~ cuda_toolkit_package_version if cuda_toolkit_package_version | length > 0 else '') }}"
+    cuda_toolkit_distro: "ubuntu{{ ansible_facts['distribution_version'] | replace('.', '') }}"
+    cuda_toolkit_keyring_deb: "{{ cuda_toolkit_cache_dir }}/cuda-keyring-{{ cuda_toolkit_distro }}_{{ cuda_toolkit_keyring_version }}_all.deb"
+    cuda_toolkit_home: "/usr/local/cuda-{{ cuda_toolkit_version }}"
+  pre_tasks:
+    - name: 校验 CUDA 安装配置
+      ansible.builtin.assert:
+        that:
+          - cuda_toolkit_enabled | bool
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] in ['22.04', '24.04']
+          - ansible_facts['architecture'] == 'x86_64'
+          - cuda_toolkit_version is match('^[0-9]+\.[0-9]+$')
+          - cuda_toolkit_package_version is match('^[0-9A-Za-z.+:~_-]*$')
+          - cuda_toolkit_keyring_version is match('^[0-9]+\.[0-9]+-[0-9]+$')
+          - cuda_toolkit_keyring_url is match('^https://')
+          - cuda_toolkit_keyring_sha256.get(cuda_toolkit_distro, '') is match('^[0-9a-f]{64}$')
+          - cuda_toolkit_cache_dir is match('^/')
+          - cuda_toolkit_apt_cache_valid_time | int >= 0
+        fail_msg: 请填写 CUDA 主次版本并开启安装；目前支持 Ubuntu 22.04/24.04 x86_64，所选版本需支持目标 Ubuntu
+
+    - name: 检查同版本 runfile CUDA 安装
+      ansible.builtin.stat:
+        path: "{{ cuda_toolkit_home }}/bin/cuda-uninstaller"
+      register: cuda_toolkit_runfile
+
+    - name: 避免同版本 CUDA 混用 runfile 和 APT
+      ansible.builtin.assert:
+        that: not cuda_toolkit_runfile.stat.exists
+        fail_msg: 检测到同版本 runfile CUDA，请先处理原安装再使用 APT
+
+    - name: 读取 CUDA Toolkit 包状态
+      ansible.builtin.command:
+        expand_argument_vars: false
+        argv: [dpkg-query, --show, '--showformat=${Status}|${Version}', "{{ cuda_toolkit_package }}"]
+      register: cuda_toolkit_installed
+      changed_when: false
+      failed_when: cuda_toolkit_installed.rc not in [0, 1]
+      check_mode: false
+
+    - name: 判断 CUDA Toolkit 是否需要安装
+      ansible.builtin.set_fact:
+        cuda_toolkit_install_needed: >-
+          {{ not cuda_toolkit_installed.stdout.startswith('install ok installed|')
+             or (cuda_toolkit_package_version | length > 0 and
+                 cuda_toolkit_installed.stdout != 'install ok installed|' ~ cuda_toolkit_package_version) }}
+
+    - name: 读取 cuda-keyring 包状态
+      ansible.builtin.command:
+        expand_argument_vars: false
+        argv: [dpkg-query, --show, '--showformat=${Status}|${Version}', cuda-keyring]
+      register: cuda_toolkit_keyring_installed
+      changed_when: false
+      failed_when: cuda_toolkit_keyring_installed.rc not in [0, 1]
+      check_mode: false
+
+    - name: 检查 keyring 注册的仓库和签名文件
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "/etc/apt/sources.list.d/cuda-{{ cuda_toolkit_distro }}-x86_64.list"
+        - /usr/share/keyrings/cuda-archive-keyring.gpg
+        - /etc/apt/preferences.d/cuda-repository-pin-600
+      register: cuda_toolkit_repo_files
+
+    - name: 判断是否需要注册或修复 CUDA 网络仓库
+      ansible.builtin.set_fact:
+        cuda_toolkit_keyring_needed: >-
+          {{ cuda_toolkit_keyring_installed.stdout != 'install ok installed|' ~ cuda_toolkit_keyring_version
+             or (cuda_toolkit_repo_files.results | rejectattr('stat.exists') | list | length > 0) }}
+
+  tasks:
+    - name: 预览 CUDA 安装计划
+      ansible.builtin.debug:
+        msg: >-
+          {{ '需要安装或修复 cuda-keyring ' ~ cuda_toolkit_keyring_version if cuda_toolkit_keyring_needed else '复用已注册的 CUDA 网络仓库' }}；
+          目标包 {{ cuda_toolkit_spec }}，{{ '需要安装或更新' if cuda_toolkit_install_needed else '已安装' }}。
+          实际执行还会确保系统编译工具已安装。dry-run 不检查下载源、密钥和依赖是否可用。
+      changed_when: cuda_toolkit_install_needed or cuda_toolkit_keyring_needed
+      when: ansible_check_mode
+
+    - name: 注册 NVIDIA 网络 APT 仓库
+      when:
+        - not ansible_check_mode
+        - cuda_toolkit_keyring_needed | bool
+      block:
+        - name: 创建 keyring 包缓存目录
+          ansible.builtin.file:
+            path: "{{ cuda_toolkit_cache_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 下载并校验 cuda-keyring 安装包
+          ansible.builtin.get_url:
+            url: "{{ cuda_toolkit_keyring_url }}"
+            dest: "{{ cuda_toolkit_keyring_deb }}"
+            checksum: "sha256:{{ cuda_toolkit_keyring_sha256[cuda_toolkit_distro] }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 安装 cuda-keyring 并恢复缺失的仓库配置
+          ansible.builtin.command:
+            argv: [dpkg, --force-confmiss, --install, "{{ cuda_toolkit_keyring_deb }}"]
+          changed_when: true
+
+    - name: 从 NVIDIA 仓库安装 CUDA Toolkit
+      when: not ansible_check_mode
+      block:
+        - name: 刷新 APT 索引
+          ansible.builtin.apt:
+            update_cache: true
+            cache_valid_time: "{{ 0 if cuda_toolkit_keyring_needed else cuda_toolkit_apt_cache_valid_time }}"
+            lock_timeout: 120
+
+        - name: 安装指定版本的 CUDA Toolkit 和系统编译工具
+          ansible.builtin.apt:
+            name: "{{ [cuda_toolkit_spec, 'build-essential'] }}"
+            state: present
+            install_recommends: false
+            fail_on_autoremove: true
+            allow_downgrade: false
+            lock_timeout: 120
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+    - name: 为登录 shell 设置 CUDA_HOME 和 PATH
+      ansible.builtin.copy:
+        dest: /etc/profile.d/ansible-cuda-toolkit.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by 87-install-cuda-toolkit.yaml
+          export CUDA_HOME={{ cuda_toolkit_home }}
+          case ":${PATH}:" in
+            *":${CUDA_HOME}/bin:"*) ;;
+            *) export PATH="${CUDA_HOME}/bin:${PATH}" ;;
+          esac
+
+    - name: 检查 CUDA 编译器版本
+      ansible.builtin.command:
+        argv: ["{{ cuda_toolkit_home }}/bin/nvcc", --version]
+      register: cuda_toolkit_nvcc
+      changed_when: false
+      failed_when: >-
+        cuda_toolkit_nvcc.rc != 0 or
+        ('release ' ~ cuda_toolkit_version ~ ',') not in cuda_toolkit_nvcc.stdout
+      when: not ansible_check_mode
+
+    - name: 显示 CUDA 安装结果
+      ansible.builtin.debug:
+        msg: "{{ cuda_toolkit_nvcc.stdout }}；重新登录以加载 CUDA_HOME/PATH。GPU 运行能力还需由 NVIDIA 驱动和实际 CUDA 程序验证。"
+      when: not ansible_check_mode

@@ -1,0 +1,232 @@
+---
+# 配置与用法见 85-install-nvidia-driver-vars.yaml
+
+- name: 从 NVIDIA 网络 APT 仓库安装驱动
+  hosts: "{{ nvidia_driver_hosts }}"
+  become: true
+  gather_facts: true
+  serial: 1
+  vars_files:
+    - 85-install-nvidia-driver-vars.yaml
+  vars:
+    nvidia_driver_distro: "ubuntu{{ ansible_facts['distribution_version'] | replace('.', '') }}"
+    nvidia_driver_headers: "linux-headers-{{ ansible_facts['kernel'] }}"
+    nvidia_driver_pinning_package: "nvidia-driver-pinning-{{ nvidia_driver_branch }}"
+    nvidia_driver_spec: "{{ nvidia_driver_package }}={{ nvidia_driver_branch }}.*"
+    nvidia_driver_keyring_deb: "{{ nvidia_driver_cache_dir }}/cuda-keyring-{{ nvidia_driver_distro }}_{{ nvidia_driver_keyring_version }}_all.deb"
+  pre_tasks:
+    - name: 校验 NVIDIA 网络仓库安装配置
+      ansible.builtin.assert:
+        that:
+          - nvidia_driver_enabled | bool
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] in ['22.04', '24.04']
+          - ansible_facts['architecture'] == 'x86_64'
+          - nvidia_driver_branch is match('^[0-9]{3}$')
+          - nvidia_driver_package in ['nvidia-open', 'cuda-drivers']
+          - nvidia_driver_keyring_version is match('^[0-9]+\.[0-9]+-[0-9]+$')
+          - nvidia_driver_keyring_url is match('^https://')
+          - nvidia_driver_keyring_sha256.get(nvidia_driver_distro, '') is match('^[0-9a-f]{64}$')
+          - nvidia_driver_cache_dir is match('^/')
+          - nvidia_driver_apt_cache_valid_time | int >= 0
+        fail_msg: 请核对 Ubuntu 22.04/24.04 x86_64 主机、驱动分支、keyring 包及启用开关
+
+    - name: 检查 runfile 驱动安装器
+      ansible.builtin.stat:
+        path: /usr/bin/nvidia-uninstall
+      register: nvidia_driver_runfile
+
+    - name: 避免与 runfile 驱动混装
+      ansible.builtin.assert:
+        that: not nvidia_driver_runfile.stat.exists
+        fail_msg: 检测到 nvidia-uninstall，请先处理已有 runfile 驱动，再使用 APT 安装
+
+    - name: 读取 keyring、驱动、锁定包和内核头文件安装状态
+      ansible.builtin.command:
+        expand_argument_vars: false
+        argv: [dpkg-query, --show, '--showformat=${Status}|${Version}', "{{ item }}"]
+      loop: "{{ ['cuda-keyring', nvidia_driver_package, nvidia_driver_pinning_package, nvidia_driver_headers] }}"
+      register: nvidia_driver_installed
+      changed_when: false
+      failed_when: nvidia_driver_installed.rc not in [0, 1]
+      check_mode: false
+
+    - name: 检查 keyring 注册的仓库和签名文件
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "/etc/apt/sources.list.d/cuda-{{ nvidia_driver_distro }}-x86_64.list"
+        - /usr/share/keyrings/cuda-archive-keyring.gpg
+        - /etc/apt/preferences.d/cuda-repository-pin-600
+      register: nvidia_driver_repo_files
+
+    - name: 判断安装状态
+      ansible.builtin.set_fact:
+        nvidia_driver_keyring_needed: >-
+          {{ nvidia_driver_installed.results[0].stdout != 'install ok installed|' ~ nvidia_driver_keyring_version
+             or (nvidia_driver_repo_files.results | rejectattr('stat.exists') | list | length > 0) }}
+        nvidia_driver_install_needed: >-
+          {{ (nvidia_driver_installed.results | rejectattr('stdout', 'match', '^install ok installed[|]') | list | length > 0)
+             or not nvidia_driver_installed.results[1].stdout.startswith('install ok installed|' ~ nvidia_driver_branch ~ '.') }}
+
+  tasks:
+    - name: 预览 NVIDIA 网络仓库安装计划
+      ansible.builtin.debug:
+        msg: >-
+          安装 cuda-keyring {{ nvidia_driver_keyring_version }}，刷新 APT 索引，
+          先安装 {{ nvidia_driver_pinning_package }}，再安装 {{ nvidia_driver_spec }} 和当前内核头文件。
+          {{ '包或仓库状态有变化，需要安装或修复' if nvidia_driver_keyring_needed or nvidia_driver_install_needed else '目标包和仓库文件已存在' }}。
+          dry-run 不验证源、依赖和 GPU 兼容性，也不检查分支内是否有新版本。
+      changed_when: nvidia_driver_keyring_needed or nvidia_driver_install_needed
+      when: ansible_check_mode
+
+    - name: 注册 NVIDIA 网络 APT 仓库
+      when:
+        - not ansible_check_mode
+        - nvidia_driver_keyring_needed | bool
+      block:
+        - name: 创建 keyring 包缓存目录
+          ansible.builtin.file:
+            path: "{{ nvidia_driver_cache_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 下载并校验 cuda-keyring 安装包
+          ansible.builtin.get_url:
+            url: "{{ nvidia_driver_keyring_url }}"
+            dest: "{{ nvidia_driver_keyring_deb }}"
+            checksum: "sha256:{{ nvidia_driver_keyring_sha256[nvidia_driver_distro] }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 安装 cuda-keyring 并恢复缺失的仓库配置
+          ansible.builtin.command:
+            argv: [dpkg, --force-confmiss, --install, "{{ nvidia_driver_keyring_deb }}"]
+          changed_when: true
+
+    - name: 从 NVIDIA 仓库安装驱动
+      when: not ansible_check_mode
+      block:
+        - name: 刷新 APT 索引
+          ansible.builtin.apt:
+            update_cache: true
+            cache_valid_time: "{{ 0 if nvidia_driver_keyring_needed else nvidia_driver_apt_cache_valid_time }}"
+            lock_timeout: 120
+
+        - name: 安装 NVIDIA 分支锁定包
+          ansible.builtin.apt:
+            name: "{{ nvidia_driver_pinning_package }}"
+            state: present
+            install_recommends: false
+            fail_on_autoremove: true
+            allow_downgrade: false
+            lock_timeout: 120
+
+        - name: 安装目标分支驱动和当前内核头文件
+          ansible.builtin.apt:
+            name: "{{ [nvidia_driver_headers, 'build-essential', nvidia_driver_spec] }}"
+            state: present
+            install_recommends: false
+            fail_on_autoremove: true
+            allow_downgrade: false
+            lock_timeout: 120
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: nvidia_driver_install
+
+    - name: 读取系统重启标记
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: nvidia_driver_reboot_required
+
+    - name: 检查 NVIDIA 驱动运行状态
+      ansible.builtin.command:
+        argv: [nvidia-smi, '--query-gpu=driver_version', '--format=csv,noheader']
+      register: nvidia_driver_smi
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: 验证当前驱动是否可用
+      ansible.builtin.assert:
+        that:
+          - nvidia_driver_smi.rc == 0
+          - nvidia_driver_smi.stdout | trim | length > 0
+          - nvidia_driver_smi.stdout_lines | reject('match', '^' ~ nvidia_driver_branch ~ '[.]') | list | length == 0
+        fail_msg: nvidia-smi 不可用或加载版本不符，请检查 GPU、内核模块、Secure Boot 签名和驱动兼容性；安装后需先重启
+      when:
+        - not ansible_check_mode
+        - not nvidia_driver_install.changed
+        - not nvidia_driver_reboot_required.stat.exists
+
+    - name: 显示驱动与重启状态
+      ansible.builtin.debug:
+        msg: >-
+          {{ nvidia_driver_smi.stdout | default('未运行 GPU 检查') }}
+          {{ '驱动包或系统状态有变化，请安排手动重启；重启后再运行本脚本验证。Secure Boot 开启时可能需在控制台注册 MOK。'
+             if (nvidia_driver_install.changed | default(false)) or nvidia_driver_reboot_required.stat.exists
+             else '当前驱动检查通过。' }}
+      when: not ansible_check_mode
+
+    - name: 安装并启用 GPU 持久模式
+      when:
+        - nvidia_driver_persistence | bool
+        - not ansible_check_mode
+      block:
+        - name: 安装 nvidia-persistenced
+          ansible.builtin.apt:
+            name: nvidia-persistenced
+            state: present
+            install_recommends: false
+            fail_on_autoremove: true
+            allow_downgrade: false
+            lock_timeout: 120
+
+        - name: 创建 persistenced drop-in 目录
+          ansible.builtin.file:
+            path: /etc/systemd/system/nvidia-persistenced.service.d
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 覆盖 Ubuntu 默认关闭的持久模式
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/nvidia-persistenced.service.d/persistence-mode.conf
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              [Unit]
+              StopWhenUnneeded=false
+              [Service]
+              ExecStart=
+              ExecStart=/usr/bin/nvidia-persistenced --user nvidia-persistenced --persistence-mode --verbose
+
+        - name: 开机自启 nvidia-persistenced
+          ansible.builtin.systemd_service:
+            name: nvidia-persistenced
+            enabled: true
+            daemon_reload: true
+            state: "{{ 'restarted' if nvidia_driver_smi.rc == 0 else omit }}"
+
+        - name: 查询持久模式
+          ansible.builtin.command:
+            argv: [nvidia-smi, '--query-gpu=persistence_mode', '--format=csv,noheader']
+          register: nvidia_persistence_mode
+          changed_when: false
+          when: nvidia_driver_smi.rc == 0
+
+        - name: 验证持久模式已开启
+          ansible.builtin.assert:
+            that: nvidia_persistence_mode.stdout_lines | map('trim') | reject('equalto', 'Enabled') | list | length == 0
+            fail_msg: "持久模式未全部开启: {{ nvidia_persistence_mode.stdout }}"
+          when: nvidia_driver_smi.rc == 0
+
+        - name: 显示持久模式
+          ansible.builtin.debug:
+            msg: "persistence_mode={{ nvidia_persistence_mode.stdout_lines | map('trim') | join(',') }}"
+          when: nvidia_driver_smi.rc == 0
