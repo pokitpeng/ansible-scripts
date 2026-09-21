@@ -1,0 +1,15 @@
+---
+# 用法：
+#   1. 设置 run_shell_commands 或 run_shell_script，确认目标和权限后设 run_shell_enabled: true。
+#   2. ansible-playbook -i hosts.ini --list-hosts 99-run-shell.yaml
+#   3. ansible-playbook -i hosts.ini 99-run-shell.yaml --limit node1
+#      --check 不会真正执行 shell 命令，不能作为执行效果验证。
+run_shell_enabled: false  # 设为 true 才执行
+run_shell_hosts: servers  # 目标主机组或主机名
+run_shell_commands: []  # 顺序执行的命令列表
+run_shell_script: ""  # 多行脚本；非空时优先于命令列表
+run_shell_become: false  # 是否提权执行
+run_shell_serial: 0  # 每批主机数；0 表示不限制
+run_shell_chdir: ""  # 命令工作目录；空为默认目录
+run_shell_fail_on_error: true  # 命令失败时是否停止该主机任务
+run_shell_environment: {}  # 额外环境变量映射

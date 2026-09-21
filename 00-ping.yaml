@@ -1,0 +1,11 @@
+---
+# 配置与用法见 00-ping-vars.yaml
+
+- name: 检查目标主机的 Ansible 连通性
+  hosts: "{{ ping_hosts }}"
+  gather_facts: false
+  vars_files:
+    - 00-ping-vars.yaml
+  tasks:
+    - name: Ping
+      ansible.builtin.ping:

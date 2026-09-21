@@ -1,0 +1,16 @@
+---
+# 用法：
+#   1. 核对每台机器的设备名、现有数据和挂载点，设置 nvme_disks 和 init_nvme_disks_enabled: true。
+#   2. ansible-playbook -i hosts.ini --list-hosts 80-init-nvme-disks.yaml
+#   3. ansible-playbook -i hosts.ini 80-init-nvme-disks.yaml --limit node1
+#      空盘会被格式化；--check 无法可靠预演格式化操作。
+# 仅在明确确认设备与挂载点后启用；空盘会被格式化。
+init_nvme_disks_enabled: false  # 设为 true 才执行
+init_nvme_disks_hosts: servers  # 目标主机组或主机名
+nvme_disk_fstype: xfs  # 空盘格式化使用的文件系统
+nvme_disk_mount_opts: defaults,noatime  # 写入 fstab 的挂载选项
+nvme_disks: []  # 设备与挂载点列表；不能为空
+# 示例：
+# nvme_disks:
+#   - device: /dev/nvme0n1
+#     mount: /data

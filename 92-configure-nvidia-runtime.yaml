@@ -1,0 +1,122 @@
+---
+# 配置与用法见 92-configure-nvidia-runtime-vars.yaml
+
+- name: 配置 Docker NVIDIA Runtime
+  hosts: "{{ nvidia_runtime_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 92-configure-nvidia-runtime-vars.yaml
+  pre_tasks:
+    - name: 校验 NVIDIA Runtime 配置
+      ansible.builtin.assert:
+        that:
+          - nvidia_runtime_enabled | bool
+          - nvidia_runtime_docker_config is match('^/')
+        fail_msg: 请确认启用开关和 Docker daemon 配置路径
+
+    - name: 检查 Docker CLI
+      ansible.builtin.command: docker --version
+      register: nvidia_runtime_docker_cli
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: 检查 NVIDIA Container Toolkit
+      ansible.builtin.command: nvidia-ctk --version
+      register: nvidia_runtime_ctk
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: 检查 NVIDIA Container Runtime
+      ansible.builtin.command:
+        argv: [nvidia-container-runtime, --version]
+      environment:
+        PATH: /opt/docker:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      register: nvidia_runtime_binary
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: 拒绝缺少前置组件的主机
+      ansible.builtin.assert:
+        that:
+          - nvidia_runtime_docker_cli.rc == 0
+          - nvidia_runtime_ctk.rc == 0
+          - "'NVIDIA Container Runtime version' in nvidia_runtime_binary.stdout"
+        fail_msg: 请先安装 Docker 和 NVIDIA Container Toolkit（nvidia-ctk、nvidia-container-runtime）
+
+  handlers:
+    - name: 重启 Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: restarted
+
+  tasks:
+    - name: 生成 NVIDIA Runtime 的目标 Docker 配置
+      ansible.builtin.command:
+        cmd: >-
+          nvidia-ctk runtime configure
+          --runtime=docker
+          --config={{ nvidia_runtime_docker_config | quote }}
+          --dry-run
+          {% if nvidia_runtime_set_as_default | bool %}--set-as-default{% endif %}
+      register: nvidia_runtime_desired_config
+      changed_when: false
+      check_mode: false
+
+    - name: 校验生成的 Docker 配置
+      ansible.builtin.set_fact:
+        nvidia_runtime_desired_json: "{{ nvidia_runtime_desired_config.stdout | from_json }}"
+
+    - name: 写入 NVIDIA Runtime 配置
+      ansible.builtin.copy:
+        dest: "{{ nvidia_runtime_docker_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+        validate: "python3 -m json.tool %s"
+        content: "{{ nvidia_runtime_desired_json | to_nice_json }}\n"
+      notify: 重启 Docker
+
+    - name: 应用 NVIDIA Runtime 配置
+      ansible.builtin.meta: flush_handlers
+
+    - name: 读取 Docker runtimes
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+          - --format
+          - "{{ '{{json .Runtimes}}' }}"
+      register: nvidia_runtime_docker_runtimes
+      changed_when: false
+      when:
+        - nvidia_runtime_verify | bool
+        - not ansible_check_mode
+
+    - name: 读取 Docker 默认 runtime
+      ansible.builtin.command:
+        argv:
+          - docker
+          - info
+          - --format
+          - "{{ '{{.DefaultRuntime}}' }}"
+      register: nvidia_runtime_docker_default
+      changed_when: false
+      when:
+        - nvidia_runtime_verify | bool
+        - not ansible_check_mode
+
+    - name: 验证 NVIDIA Runtime 已生效
+      ansible.builtin.assert:
+        that:
+          - "'nvidia' in nvidia_runtime_docker_runtimes.stdout"
+          - not (nvidia_runtime_set_as_default | bool) or nvidia_runtime_docker_default.stdout == 'nvidia'
+        success_msg: >-
+          NVIDIA runtime 已注册；默认 runtime={{ nvidia_runtime_docker_default.stdout }}
+      when:
+        - nvidia_runtime_verify | bool
+        - not ansible_check_mode

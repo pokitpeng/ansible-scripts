@@ -1,0 +1,16 @@
+---
+# 用法：
+#   1. 设置 ssh_key_source_host、ssh_key_target_hosts，设 ssh_key_enabled: true。
+#   2. ansible-playbook -i hosts.ini --list-hosts 40-setup-root-ssh-key.yaml
+#   3. ansible-playbook -i hosts.ini 40-setup-root-ssh-key.yaml --limit node1,node2
+#      --limit 必须包含源节点和本次要分发的目标节点。
+ssh_key_enabled: false  # 设为 true 才执行
+# 改为 inventory 中准备密钥的主机名。
+ssh_key_source_host: node1  # 生成并读取公钥的源主机
+ssh_key_target_hosts: servers  # 接收公钥的目标主机
+ssh_key_include_source: false  # 是否也给源主机写入公钥
+ssh_key_type: ed25519  # 密钥算法：ed25519 或 rsa
+ssh_key_size: 4096  # RSA 位数；ed25519 时忽略
+ssh_key_private_path: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"  # 源主机私钥路径
+ssh_key_public_path: /root/.ssh/id_ed25519.pub  # 源主机公钥路径
+ssh_key_verify: false  # 是否测试源主机到目标的免密连接

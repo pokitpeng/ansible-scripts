@@ -1,0 +1,74 @@
+---
+# 配置与用法见 30-set-hostname-vars.yaml
+
+- name: 校验 hostname 配置
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 30-set-hostname-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          set_hostname_enabled 为 false，请在 30-set-hostname-vars.yaml 中设为 true
+          或通过 -e set_hostname_enabled=true 启用
+      when: not (set_hostname_enabled | bool)
+
+    - name: 打印目标主机
+      ansible.builtin.debug:
+        msg: "目标主机: {{ set_hostname_hosts }}（可用 --limit 进一步限定）"
+
+- name: 修改节点 hostname
+  hosts: "{{ set_hostname_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 30-set-hostname-vars.yaml
+  vars:
+    set_hostname_target: "{{ set_hostname_mapping[inventory_hostname] | default(inventory_hostname) }}"
+  pre_tasks:
+    - name: 校验本机 hostname 任务已启用
+      ansible.builtin.assert:
+        that: set_hostname_enabled | bool
+  tasks:
+    - name: 打印目标 hostname
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}):
+          {{ ansible_facts['hostname'] | default('unknown') }} -> {{ set_hostname_target }}
+
+    - name: 设置系统 hostname
+      ansible.builtin.hostname:
+        name: "{{ set_hostname_target }}"
+        use: systemd
+      when: ansible_facts['hostname'] != set_hostname_target
+
+    - name: 更新 /etc/hosts 中 127.0.1.1
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s+'
+        line: "127.0.1.1 {{ set_hostname_target }}"
+        create: false
+      when: set_hostname_update_etc_hosts | bool
+
+    - name: 确认 hostname 已生效
+      ansible.builtin.command: hostname
+      register: hostname_result
+      changed_when: false
+
+    - name: 打印当前 hostname
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: hostname={{ hostname_result.stdout }}"
+      when: set_hostname_verify | bool
+
+    - name: 打印 hostnamectl 状态
+      ansible.builtin.command: hostnamectl status
+      register: hostnamectl_result
+      changed_when: false
+      when: set_hostname_verify | bool
+
+    - name: 显示 hostnamectl 输出
+      ansible.builtin.debug:
+        msg: "{{ hostnamectl_result.stdout_lines }}"
+      when: set_hostname_verify | bool

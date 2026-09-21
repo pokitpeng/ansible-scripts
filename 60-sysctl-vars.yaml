@@ -1,0 +1,15 @@
+---
+# 用法：
+#   1. 设置 sysctl_params 并核对目标，设 sysctl_enabled: true。
+#   2. ansible-playbook -i hosts.ini 60-sysctl.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 60-sysctl.yaml --limit node1
+sysctl_enabled: true  # 设为 true 才执行
+sysctl_hosts: servers  # 目标主机组或主机名
+sysctl_file: /etc/sysctl.d/99-ansible-scripts.conf  # 持久化参数的配置文件
+sysctl_reload: true  # 写入后是否立即加载
+sysctl_verify: true  # 是否打印当前参数值
+sysctl_params: |  # 每行一个 key=value；行尾可写说明
+  fs.inotify.max_user_watches=524288  # 单用户可创建的 inotify watch 上限
+  fs.inotify.max_user_instances=1024  # 单用户可创建的 inotify instance 上限
+  net.ipv4.ip_local_port_range=32768 60999  # 本地端口范围
+  net.ipv4.ip_local_reserved_ports=30000-32767  # 本地保留端口范围,用于k8s nodePort

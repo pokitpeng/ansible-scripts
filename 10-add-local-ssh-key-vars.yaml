@@ -1,0 +1,12 @@
+---
+# 用法：
+#   1. 确认本机公钥路径，设 local_ssh_key_enabled: true。
+#   2. ansible-playbook -i hosts.ini --list-hosts 10-add-local-ssh-key.yaml
+#   3. ansible-playbook -i hosts.ini 10-add-local-ssh-key.yaml --limit node1
+# 把控制机本机公钥写入目标登录用户；通常在 00-ping 之后尽早执行。
+local_ssh_key_enabled: false  # 设为 true 才执行
+local_ssh_key_hosts: servers  # 接收公钥的目标主机
+local_ssh_pubkey_path: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"  # 本机公钥路径
+local_ssh_key_user: ""  # 目标用户；空则用 inventory 的 ansible_user
+local_ssh_key_also_root: false  # 是否同时写入 root authorized_keys
+local_ssh_key_verify: false  # 是否从本机测试免密连接

@@ -1,0 +1,89 @@
+---
+# 配置与用法见 95-install-buildx-vars.yaml
+
+- name: 安装 Docker Buildx 插件
+  hosts: "{{ docker_buildx_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 95-install-buildx-vars.yaml
+  vars:
+    docker_buildx_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], '') }}"
+    docker_buildx_download_path: "/opt/docker-buildx-v{{ docker_buildx_version }}-{{ docker_buildx_arch }}"
+  pre_tasks:
+    - name: 校验本机 Buildx 安装配置
+      ansible.builtin.assert:
+        that:
+          - docker_buildx_enabled | bool
+          - ansible_facts['system'] == 'Linux'
+          - docker_buildx_arch | length > 0
+          - docker_buildx_source_url is match('^https://')
+          - docker_buildx_sha256.get(docker_buildx_arch, '') is match('^[0-9a-f]{64}$')
+        fail_msg: 请确认启用开关、Linux 架构、Buildx 下载地址及 SHA256
+
+    - name: 检查 Docker CLI 是否可用
+      ansible.builtin.command: docker --version
+      register: docker_cli_result
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: 拒绝尚未安装 Docker 的主机
+      ansible.builtin.assert:
+        that: docker_cli_result.rc == 0
+        fail_msg: 请先运行 90-install-docker.yaml 或安装 Docker CLI
+
+  tasks:
+    - name: 创建 root 的 Docker CLI 插件目录
+      ansible.builtin.file:
+        path: /root/.docker/cli-plugins
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: 下载指定版本的 Buildx
+      ansible.builtin.get_url:
+        url: "{{ docker_buildx_source_url }}/releases/download/v{{ docker_buildx_version }}/buildx-v{{ docker_buildx_version }}.linux-{{ docker_buildx_arch }}"
+        dest: "{{ docker_buildx_download_path }}"
+        checksum: "sha256:{{ docker_buildx_sha256[docker_buildx_arch] }}"
+        mode: "0755"
+
+    - name: 安装 root 的 Buildx 插件
+      ansible.builtin.copy:
+        src: "{{ docker_buildx_download_path }}"
+        dest: /root/.docker/cli-plugins/docker-buildx
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: 检查 root 的 Docker CLI 配置
+      ansible.builtin.stat:
+        path: /root/.docker/config.json
+      register: docker_root_cli_config_stat
+
+    - name: 读取已有的 root Docker CLI 配置
+      ansible.builtin.slurp:
+        src: /root/.docker/config.json
+      register: docker_root_cli_config_raw
+      when: docker_root_cli_config_stat.stat.exists
+      no_log: true
+
+    - name: 启用 root Docker CLI experimental 功能
+      ansible.builtin.copy:
+        dest: /root/.docker/config.json
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ ((docker_root_cli_config_raw.content | b64decode | from_json) if docker_root_cli_config_stat.stat.exists else {}) | combine({'experimental': 'enabled'}) | to_nice_json }}\n"
+      no_log: true
+
+    - name: 查看 Buildx 版本
+      ansible.builtin.command: docker buildx version
+      register: docker_buildx_version_result
+      changed_when: false
+
+    - name: 显示安装结果
+      ansible.builtin.debug:
+        msg: "{{ docker_buildx_version_result.stdout }}"

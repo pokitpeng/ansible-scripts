@@ -1,0 +1,142 @@
+---
+# 配置与用法见 50-configure-dns-vars.yaml
+
+- name: 校验 DNS 配置任务
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 50-configure-dns-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          configure_dns_enabled 为 false，请在 50-configure-dns-vars.yaml 中设为 true
+          或通过 -e configure_dns_enabled=true 启用
+      when: not (configure_dns_enabled | bool)
+
+    - name: 打印目标与 DNS
+      ansible.builtin.debug:
+        msg: >-
+          目标主机: {{ configure_dns_hosts }}；
+          DNS: {{ dns_servers }}；
+          可用 --limit 进一步限定
+
+    - name: 拒绝空的 DNS 服务器列表
+      ansible.builtin.assert:
+        that: dns_servers | length > 0
+        fail_msg: 请配置 dns_servers
+
+- name: 通过 netplan 配置内网 DNS
+  hosts: "{{ configure_dns_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 50-configure-dns-vars.yaml
+  pre_tasks:
+    - name: 校验本机 DNS 任务已启用且服务器列表非空
+      ansible.builtin.assert:
+        that:
+          - configure_dns_enabled | bool
+          - dns_servers | length > 0
+  tasks:
+    - name: 确认 netplan 文件存在
+      ansible.builtin.stat:
+        path: "{{ configure_dns_netplan_file }}"
+      register: netplan_stat
+
+    - name: 拒绝缺少 netplan 文件的节点
+      ansible.builtin.fail:
+        msg: "{{ configure_dns_netplan_file }} 不存在，拒绝改 DNS"
+      when: not netplan_stat.stat.exists
+
+    - name: 禁止 cloud-init 覆盖网络配置
+      ansible.builtin.copy:
+        dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+        content: "network: {config: disabled}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: configure_dns_disable_cloud_init_network | bool
+
+    - name: 确认 python3-yaml 可用
+      ansible.builtin.command: python3 -c 'import yaml'
+      changed_when: false
+
+    - name: 用 Python 重写 netplan nameservers
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import pathlib
+        import sys
+        import yaml
+
+        path = pathlib.Path({{ configure_dns_netplan_file | to_json }})
+        dns_servers = {{ dns_servers | to_json }}
+        text = path.read_text()
+        data = yaml.safe_load(text)
+        ethernets = data.get("network", {}).get("ethernets") or {}
+        if not ethernets:
+            sys.exit("no ethernets in netplan")
+        changed = False
+        for name, cfg in ethernets.items():
+            cfg = cfg or {}
+            ns = dict(cfg.get("nameservers") or {})
+            old = list(ns.get("addresses") or [])
+            if old != dns_servers:
+                changed = True
+            ns["addresses"] = list(dns_servers)
+            if "search" not in ns:
+                ns["search"] = []
+            cfg["nameservers"] = ns
+            ethernets[name] = cfg
+        if not changed:
+            print("UNCHANGED")
+            sys.exit(0)
+        path.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+        print("CHANGED")
+        PY
+      args:
+        executable: /bin/bash
+      register: netplan_update
+      changed_when: "'CHANGED' in netplan_update.stdout"
+
+    - name: 应用 netplan
+      ansible.builtin.command: netplan apply
+      when: netplan_update is changed
+
+    - name: 等待 resolved 生效
+      ansible.builtin.pause:
+        seconds: 2
+      when: netplan_update is changed
+
+    - name: 打印当前 uplink DNS
+      ansible.builtin.command: resolvectl dns
+      register: resolvectl_dns
+      changed_when: false
+      when: configure_dns_verify | bool
+
+    - name: 显示 resolvectl dns
+      ansible.builtin.debug:
+        msg: "{{ resolvectl_dns.stdout_lines }}"
+      when: configure_dns_verify | bool
+
+    - name: 验证域名解析走内网
+      ansible.builtin.shell: |
+        set -euo pipefail
+        out=$(dig +short {{ configure_dns_verify_domain | quote }} | head -n 1)
+        echo "$out"
+        case "$out" in
+          {{ configure_dns_verify_prefix | quote }}*) exit 0 ;;
+          *) echo "unexpected: $out" >&2; exit 1 ;;
+        esac
+      args:
+        executable: /bin/bash
+      register: dig_verify
+      changed_when: false
+      when: configure_dns_verify | bool
+
+    - name: 打印验证结果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ configure_dns_verify_domain }} -> {{ dig_verify.stdout }}"
+      when: configure_dns_verify | bool

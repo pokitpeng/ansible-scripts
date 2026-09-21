@@ -1,0 +1,14 @@
+---
+# 用法：
+#   1. 核对 netplan 文件和 dns_servers，设 configure_dns_enabled: true。
+#   2. ansible-playbook -i hosts.ini 50-configure-dns.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 50-configure-dns.yaml --limit node1
+# Ubuntu netplan。cloud-init 机器多为 50-cloud-init.yaml；安装器机器多为 00-installer-config.yaml。
+configure_dns_enabled: true  # 设为 true 才执行
+configure_dns_hosts: servers  # 目标主机组或主机名
+configure_dns_netplan_file: /etc/netplan/50-cloud-init.yaml  # 要修改的 netplan 文件
+configure_dns_disable_cloud_init_network: true  # 禁止 cloud-init 重启后覆盖 netplan
+dns_servers: ["114.114.114.114", "8.8.8.8"]  # 要写入的 DNS 地址列表；不能为空
+configure_dns_verify: false  # 是否用 dig 验证解析
+configure_dns_verify_domain: example.com  # 验证时查询的域名
+configure_dns_verify_prefix: "192.0.2."  # 期望解析结果的 IP 前缀

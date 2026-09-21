@@ -1,0 +1,123 @@
+---
+# 配置与用法见 99-run-shell-vars.yaml
+
+- name: 校验 shell 执行配置
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 99-run-shell-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的 shell 任务
+      ansible.builtin.fail:
+        msg: >-
+          run_shell_enabled 为 false，请在 99-run-shell-vars.yaml 中设为 true 后再执行
+      when: not (run_shell_enabled | bool)
+
+    - name: 拒绝空的命令配置
+      ansible.builtin.fail:
+        msg: >-
+          未配置可执行的命令，请在 99-run-shell-vars.yaml 中设置 run_shell_commands
+          或 run_shell_script
+      when:
+        - run_shell_script | default('') | trim | length == 0
+        - run_shell_commands | default([]) | length == 0
+
+    - name: 打印目标主机组
+      ansible.builtin.debug:
+        msg: "目标主机组: {{ run_shell_hosts }}（可用 --limit 进一步限定）"
+
+    - name: 打印待执行脚本
+      ansible.builtin.debug:
+        msg: "{{ run_shell_script }}"
+      when: run_shell_script | default('') | trim | length > 0
+
+    - name: 打印待执行命令
+      ansible.builtin.debug:
+        msg: "{{ run_shell_commands }}"
+      when: run_shell_script | default('') | trim | length == 0
+
+- name: 执行自定义 shell
+  hosts: "{{ run_shell_hosts }}"
+  become: "{{ run_shell_become | bool }}"
+  gather_facts: false
+  serial: "{{ run_shell_serial if (run_shell_serial | int) > 0 else '100%' }}"
+  vars_files:
+    - 99-run-shell-vars.yaml
+  pre_tasks:
+    - name: 校验本机命令任务已启用且内容非空
+      ansible.builtin.assert:
+        that:
+          - run_shell_enabled | bool
+          - (run_shell_script | trim | length > 0) or (run_shell_commands | length > 0)
+  tasks:
+    - name: 打印脚本执行命令
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: 执行脚本（{{ run_shell_chdir | default('') | ternary('chdir=' ~ run_shell_chdir, '默认目录') }}）"
+      when: run_shell_script | default('') | trim | length > 0
+
+    - name: 执行脚本
+      ansible.builtin.shell: |
+        {{ run_shell_script }}
+      args:
+        executable: /bin/bash
+        chdir: "{{ run_shell_chdir if run_shell_chdir | default('') | length > 0 else omit }}"
+      environment: "{{ run_shell_environment | default({}) }}"
+      register: script_result
+      ignore_errors: "{{ not (run_shell_fail_on_error | bool) }}"
+      changed_when: true
+      when: run_shell_script | default('') | trim | length > 0
+
+    - name: 打印脚本 stdout
+      ansible.builtin.debug:
+        msg: "{{ script_result.stdout_lines | default([]) }}"
+      when:
+        - run_shell_script | default('') | trim | length > 0
+        - script_result.stdout | default('') | length > 0
+
+    - name: 打印脚本 stderr
+      ansible.builtin.debug:
+        msg: "{{ script_result.stderr_lines | default([]) }}"
+      when:
+        - run_shell_script | default('') | trim | length > 0
+        - script_result.stderr | default('') | length > 0
+
+    - name: 打印命令
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ item }}"
+      loop: "{{ run_shell_commands }}"
+      when: run_shell_script | default('') | trim | length == 0
+
+    - name: 执行命令
+      ansible.builtin.shell: "{{ item }}"
+      args:
+        executable: /bin/bash
+        chdir: "{{ run_shell_chdir if run_shell_chdir | default('') | length > 0 else omit }}"
+      environment: "{{ run_shell_environment | default({}) }}"
+      loop: "{{ run_shell_commands }}"
+      register: command_results
+      ignore_errors: "{{ not (run_shell_fail_on_error | bool) }}"
+      changed_when: true
+      when: run_shell_script | default('') | trim | length == 0
+      loop_control:
+        label: "{{ item }}"
+
+    - name: 打印命令 stdout
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} [{{ item.item }}]: {{ item.stdout_lines | default([]) }}"
+      loop: "{{ command_results.results | default([]) }}"
+      when:
+        - run_shell_script | default('') | trim | length == 0
+        - item.stdout | default('') | length > 0
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: 打印命令 stderr
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} [{{ item.item }}]: {{ item.stderr_lines | default([]) }}"
+      loop: "{{ command_results.results | default([]) }}"
+      when:
+        - run_shell_script | default('') | trim | length == 0
+        - item.stderr | default('') | length > 0
+      loop_control:
+        label: "{{ item.item }}"

@@ -1,0 +1,30 @@
+---
+# 配置与用法见 70-disable-auto-updates-vars.yaml
+
+- name: 关闭 Ubuntu 自动更新
+  hosts: all
+  become: true
+  gather_facts: false
+  vars_files:
+    - 70-disable-auto-updates-vars.yaml
+  pre_tasks:
+    - name: 校验自动更新任务已启用
+      ansible.builtin.assert:
+        that: disable_auto_updates_enabled | bool
+  tasks:
+    - name: 禁用并停止自动更新相关 systemd 单元
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop: "{{ auto_update_services }}"
+      register: disable_result
+      failed_when:
+        - disable_result is failed
+        - "'could not be found' not in (disable_result.msg | default('') | lower)"
+        - "'could not find the requested service' not in (disable_result.msg | default('') | lower)"
+        - "'not found' not in (disable_result.msg | default('') | lower)"
+
+    - name: 汇总已禁用的单元
+      ansible.builtin.debug:
+        msg: "{{ disable_result.results | selectattr('changed') | map(attribute='item') | list }}"

@@ -1,0 +1,154 @@
+---
+# 配置与用法见 91-install-nvidia-container-toolkit-vars.yaml
+
+- name: 安装 NVIDIA Container Toolkit
+  hosts: "{{ nvidia_toolkit_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 91-install-nvidia-container-toolkit-vars.yaml
+  vars:
+    nvidia_toolkit_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], '') }}"
+    nvidia_toolkit_deb_version: "{{ nvidia_toolkit_version }}-{{ nvidia_toolkit_package_revision }}"
+    nvidia_toolkit_archive_name: "nvidia-container-toolkit_{{ nvidia_toolkit_version }}_deb_{{ nvidia_toolkit_arch }}.tar.gz"
+    nvidia_toolkit_extract_dir: "{{ nvidia_toolkit_cache_dir }}/{{ nvidia_toolkit_version }}-{{ nvidia_toolkit_arch }}"
+    nvidia_toolkit_packages:
+      - libnvidia-container1
+      - libnvidia-container-tools
+      - nvidia-container-toolkit-base
+      - nvidia-container-toolkit
+  pre_tasks:
+    - name: 校验 Toolkit 安装配置
+      ansible.builtin.assert:
+        that:
+          - nvidia_toolkit_enabled | bool
+          - ansible_facts['os_family'] == 'Debian'
+          - nvidia_toolkit_arch | length > 0
+          - nvidia_toolkit_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - nvidia_toolkit_package_revision is match('^[0-9]+$')
+          - nvidia_toolkit_source_url is match('^https://')
+          - nvidia_toolkit_cache_dir is match('^/')
+          - nvidia_toolkit_sha256.get(nvidia_toolkit_arch, '') is match('^[0-9a-f]{64}$')
+        fail_msg: 请核对启用开关、Ubuntu/Debian 系统、架构、版本、下载地址和 SHA256
+
+    - name: 读取已安装的 Toolkit 包版本
+      ansible.builtin.command:
+        expand_argument_vars: false
+        argv:
+          - dpkg-query
+          - --show
+          - '--showformat=${Status}|${Version}'
+          - "{{ item }}"
+      loop: "{{ nvidia_toolkit_packages }}"
+      register: nvidia_toolkit_installed
+      changed_when: false
+      failed_when: nvidia_toolkit_installed.rc not in [0, 1]
+      check_mode: false
+
+    - name: 判断是否需要安装或更新 Toolkit
+      ansible.builtin.set_fact:
+        nvidia_toolkit_install_needed: >-
+          {{ nvidia_toolkit_installed.results
+             | rejectattr('stdout', 'equalto', 'install ok installed|' ~ nvidia_toolkit_deb_version)
+             | list | length > 0 }}
+
+  tasks:
+    - name: 预览 Toolkit 安装计划
+      ansible.builtin.debug:
+        msg: >-
+          目标版本 {{ nvidia_toolkit_deb_version }}，架构 {{ nvidia_toolkit_arch }}；
+          {{ '需要安装或更新四个 Toolkit 包' if nvidia_toolkit_install_needed else '四个包版本一致，无需安装' }}。
+          dry-run 不验证镜像文件是否存在，也不解析 APT 依赖。
+      changed_when: nvidia_toolkit_install_needed | bool
+      when: ansible_check_mode
+
+    - name: 下载并安装 Toolkit
+      when:
+        - nvidia_toolkit_install_needed | bool
+        - not ansible_check_mode
+      block:
+        - name: 创建版本缓存目录
+          ansible.builtin.file:
+            path: "{{ nvidia_toolkit_extract_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 从国内源下载并校验 Toolkit 压缩包
+          ansible.builtin.get_url:
+            url: "{{ nvidia_toolkit_source_url }}/releases/download/v{{ nvidia_toolkit_version }}/{{ nvidia_toolkit_archive_name }}"
+            dest: "{{ nvidia_toolkit_cache_dir }}/{{ nvidia_toolkit_archive_name }}"
+            checksum: "sha256:{{ nvidia_toolkit_sha256[nvidia_toolkit_arch] }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 解压 Toolkit deb 包
+          ansible.builtin.unarchive:
+            src: "{{ nvidia_toolkit_cache_dir }}/{{ nvidia_toolkit_archive_name }}"
+            dest: "{{ nvidia_toolkit_extract_dir }}"
+            remote_src: true
+
+        - name: 查找所需的四个运行时 deb 包
+          ansible.builtin.find:
+            paths: "{{ nvidia_toolkit_extract_dir }}"
+            recurse: true
+            patterns: "{{ item }}_{{ nvidia_toolkit_deb_version }}_{{ nvidia_toolkit_arch }}.deb"
+          loop: "{{ nvidia_toolkit_packages }}"
+          register: nvidia_toolkit_debs
+
+        - name: 确认每个运行时包均存在且唯一
+          ansible.builtin.assert:
+            that: item.matched == 1
+            fail_msg: "压缩包中未找到唯一的 {{ item.item }} deb 包，请核对版本和包修订号"
+          loop: "{{ nvidia_toolkit_debs.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        # 同一次 APT 事务安装四个本地包，避免逐包升级时旧版本的精确依赖冲突。
+        - name: 安装本地 Toolkit 包及系统依赖
+          ansible.builtin.command:
+            argv: >-
+              {{ ['apt-get', '-y', '--no-remove', '--no-install-recommends',
+                  '-o', 'DPkg::Lock::Timeout=120',
+                  '-o', 'Dpkg::Options::=--force-confdef',
+                  '-o', 'Dpkg::Options::=--force-confold', 'install']
+                 + (nvidia_toolkit_debs.results | map(attribute='files') | flatten | map(attribute='path') | list) }}
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          changed_when: true
+
+    - name: 验证安装后的四个包版本
+      ansible.builtin.command:
+        expand_argument_vars: false
+        argv:
+          - dpkg-query
+          - --show
+          - '--showformat=${Status}|${Version}'
+          - "{{ item }}"
+      loop: "{{ nvidia_toolkit_packages }}"
+      register: nvidia_toolkit_verified
+      changed_when: false
+      failed_when: >-
+        nvidia_toolkit_verified.rc != 0 or
+        nvidia_toolkit_verified.stdout != 'install ok installed|' ~ nvidia_toolkit_deb_version
+      when: not ansible_check_mode
+
+    # nvidia-container-runtime --version 会探测 runc/crun；静态 Docker 的 runc 在 /opt/docker。
+    - name: 验证 NVIDIA Toolkit 命令可用
+      ansible.builtin.command:
+        argv: ["{{ item }}", --version]
+      environment:
+        PATH: /opt/docker:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      loop:
+        - nvidia-ctk
+        - nvidia-container-runtime
+      register: nvidia_toolkit_cmd
+      changed_when: false
+      failed_when: >-
+        (item == 'nvidia-ctk' and nvidia_toolkit_cmd.rc != 0)
+        or
+        (item == 'nvidia-container-runtime'
+         and 'NVIDIA Container Runtime version' not in nvidia_toolkit_cmd.stdout)
+      when: not ansible_check_mode

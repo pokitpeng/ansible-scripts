@@ -1,0 +1,13 @@
+---
+# 用法：
+#   1. 确认目标机已有 Docker，核对版本、Gitee 源、安装路径和校验值，设 docker_compose_enabled: true。
+#   2. ansible-playbook -i hosts.ini 97-install-docker-compose.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 97-install-docker-compose.yaml --limit node1
+docker_compose_enabled: true  # 设为 true 才执行
+docker_compose_hosts: servers  # 目标主机组或主机名
+docker_compose_version: "5.5.1"  # Docker Compose 独立二进制版本
+docker_compose_source_url: https://gitee.com/banbaolatiao/compose  # Compose 发布仓库根地址
+docker_compose_install_path: /usr/local/bin/docker-compose  # 独立命令安装路径
+docker_compose_sha256:  # 官方 v5.5.1 二进制校验值；更换版本时同步更新
+  x86_64: "db1889184726840f75c4f9c001048430d4f25b3be3cb084d3ddd762bc0aed576"  # x86_64 文件
+  aarch64: "732e3a84c1a0f67256ce80bc2598a24546b10ca05f9faa97efceb1171ece2ef7"  # aarch64 文件

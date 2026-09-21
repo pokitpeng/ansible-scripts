@@ -1,0 +1,97 @@
+---
+# 配置与用法见 60-sysctl-vars.yaml
+
+- name: 校验 sysctl 配置
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 60-sysctl-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          sysctl_enabled 为 false，请在 60-sysctl-vars.yaml 中设为 true
+          或通过 -e sysctl_enabled=true 启用
+      when: not (sysctl_enabled | bool)
+
+    - name: 拒绝空的参数列表
+      ansible.builtin.fail:
+        msg: 请在 60-sysctl-vars.yaml 中设置 sysctl_params
+      when: sysctl_params | default('') | trim | length == 0
+
+    - name: 打印目标与参数
+      ansible.builtin.debug:
+        msg: >-
+          目标: {{ sysctl_hosts }}（可用 --limit 进一步限定）；
+          文件: {{ sysctl_file }}；
+          参数: {{ sysctl_params }}
+
+- name: 配置内核参数
+  hosts: "{{ sysctl_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 60-sysctl-vars.yaml
+  pre_tasks:
+    - name: 解析 key=value 参数行
+      ansible.builtin.set_fact:
+        sysctl_param_lines: >-
+          {{ sysctl_params.splitlines()
+             | map('regex_replace', '\s+#.*$', '')
+             | map('trim')
+             | reject('equalto', '')
+             | list }}
+
+    - name: 校验本机 sysctl 任务已启用且参数非空
+      ansible.builtin.assert:
+        that:
+          - sysctl_enabled | bool
+          - sysctl_params is string
+          - sysctl_param_lines | length > 0
+
+    - name: 校验 sysctl 参数格式
+      ansible.builtin.assert:
+        that: item is match('^[A-Za-z0-9_.]+=.+$')
+        fail_msg: "{{ item }} 格式错误，应为 key=value"
+      loop: "{{ sysctl_param_lines }}"
+  tasks:
+    - name: 幂等写入 sysctl 配置文件
+      ansible.builtin.lineinfile:
+        path: "{{ sysctl_file }}"
+        regexp: '^\s*#?\s*{{ item.split("=", 1)[0] | regex_escape }}\s*='
+        line: "{{ item }}"
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ sysctl_param_lines }}"
+      register: sysctl_line_result
+
+    - name: 立即加载 sysctl
+      ansible.builtin.command: sysctl -p {{ sysctl_file }}
+      when:
+        - sysctl_reload | bool
+        - sysctl_line_result.results | selectattr('changed') | list | length > 0
+      changed_when: true
+
+    - name: 读取当前内核参数
+      ansible.builtin.command:
+        argv:
+          - sysctl
+          - -n
+          - "{{ item.split('=', 1)[0] }}"
+      loop: "{{ sysctl_param_lines }}"
+      register: sysctl_current
+      changed_when: false
+      when: sysctl_verify | bool
+
+    - name: 打印当前内核参数
+      ansible.builtin.debug:
+        msg: "{{ item.item.split('=', 1)[0] }}={{ item.stdout }}"
+      loop: "{{ sysctl_current.results | default([]) }}"
+      when:
+        - sysctl_verify | bool
+        - item is not skipped
+      loop_control:
+        label: "{{ item.item.split('=', 1)[0] }}"

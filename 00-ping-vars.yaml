@@ -1,0 +1,7 @@
+---
+# 用法：
+#   1. 在 hosts.ini 配置目标主机，按需修改 ping_hosts。
+#   2. ansible-playbook -i hosts.ini 00-ping.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 00-ping.yaml --limit node1
+#   4. ansible-playbook -i hosts.ini 00-ping.yaml
+ping_hosts: all  # 要检查的主机组或主机名；可用 --limit 缩小范围

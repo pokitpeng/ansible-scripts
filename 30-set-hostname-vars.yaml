@@ -1,0 +1,10 @@
+---
+# 用法：
+#   1. 核对 set_hostname_hosts / set_hostname_mapping，设 set_hostname_enabled: true。
+#   2. ansible-playbook -i hosts.ini 30-set-hostname.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 30-set-hostname.yaml --limit node1
+set_hostname_enabled: true  # 设为 true 才执行
+set_hostname_hosts: servers  # 目标主机组或主机名
+set_hostname_mapping: {}  # 主机名映射；空时使用 inventory 名称
+set_hostname_update_etc_hosts: false  # 是否更新 /etc/hosts 的 127.0.1.1 行
+set_hostname_verify: true  # 是否打印 hostnamectl 验证结果

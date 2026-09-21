@@ -1,0 +1,126 @@
+---
+# 配置与用法见 80-init-nvme-disks-vars.yaml
+
+- name: 校验 NVMe 盘初始化配置
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 80-init-nvme-disks-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          init_nvme_disks_enabled 为 false，请在 80-init-nvme-disks-vars.yaml 中设为 true
+          或通过 -e init_nvme_disks_enabled=true 启用
+      when: not (init_nvme_disks_enabled | bool)
+
+    - name: 拒绝空的盘列表
+      ansible.builtin.fail:
+        msg: nvme_disks 为空，请在 80-init-nvme-disks-vars.yaml 中配置设备与挂载点
+      when: nvme_disks | default([]) | length == 0
+
+    - name: 打印目标主机
+      ansible.builtin.debug:
+        msg: "目标主机: {{ init_nvme_disks_hosts }}（可用 --limit 进一步限定）"
+
+    - name: 打印盘映射
+      ansible.builtin.debug:
+        msg: "{{ item.device }} -> {{ item.mount }} ({{ nvme_disk_fstype }})"
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }}"
+
+- name: 初始化并挂载 NVMe 盘
+  hosts: "{{ init_nvme_disks_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 80-init-nvme-disks-vars.yaml
+  pre_tasks:
+    - name: 校验本机磁盘任务已启用且映射非空
+      ansible.builtin.assert:
+        that:
+          - init_nvme_disks_enabled | bool
+          - nvme_disks | length > 0
+  tasks:
+    - name: 确认 NVMe 设备存在
+      ansible.builtin.stat:
+        path: "{{ item.device }}"
+      register: disk_stat
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }}"
+      failed_when: not disk_stat.stat.exists
+
+    - name: 读取当前挂载点
+      ansible.builtin.command: findmnt -n -S {{ item.device }} -o TARGET
+      register: disk_findmnt
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }}"
+      failed_when: false
+      changed_when: false
+
+    - name: 拒绝已挂载到其他路径的磁盘
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.item.device }} 已挂载到 {{ item.stdout | trim }}，
+          与目标挂载点 {{ item.item.mount }} 不一致，请手动处理
+      loop: "{{ disk_findmnt.results }}"
+      loop_control:
+        label: "{{ item.item.device }}"
+      when:
+        - item.rc == 0
+        - item.stdout | trim != item.item.mount
+
+    - name: 读取文件系统类型
+      ansible.builtin.command: blkid -o value -s TYPE {{ item.device }}
+      register: disk_blkid
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }}"
+      failed_when: false
+      changed_when: false
+
+    - name: 格式化空盘为 xfs
+      ansible.builtin.command: "mkfs.{{ nvme_disk_fstype }} -f {{ item.item.device }}"
+      loop: "{{ disk_blkid.results }}"
+      loop_control:
+        label: "{{ item.item.device }}"
+      when: item.stdout | default('') | trim | length == 0
+
+    - name: 创建挂载点目录
+      ansible.builtin.file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.mount }}"
+
+    - name: 挂载并写入 fstab
+      ansible.builtin.mount:
+        path: "{{ item.mount }}"
+        src: "{{ item.device }}"
+        fstype: "{{ nvme_disk_fstype }}"
+        opts: "{{ nvme_disk_mount_opts }}"
+        state: mounted
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }} -> {{ item.mount }}"
+
+    - name: 打印挂载结果
+      ansible.builtin.command: lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT {{ item.device }}
+      register: lsblk_result
+      loop: "{{ nvme_disks }}"
+      loop_control:
+        label: "{{ item.device }}"
+      changed_when: false
+
+    - name: 显示 lsblk 输出
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ lsblk_result.results }}"
+      loop_control:
+        label: "{{ item.item.device }}"

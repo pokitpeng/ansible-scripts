@@ -1,0 +1,4 @@
+hosts.ini
+*-vars.local.yaml
+*.retry
+.ansible/

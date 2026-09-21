@@ -1,0 +1,101 @@
+---
+# 配置与用法见 10-add-local-ssh-key-vars.yaml
+
+- name: 校验本机 SSH 公钥
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 10-add-local-ssh-key-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          local_ssh_key_enabled 为 false，请在 10-add-local-ssh-key-vars.yaml 中设为 true
+          或通过 -e local_ssh_key_enabled=true 启用
+      when: not (local_ssh_key_enabled | bool)
+
+    - name: 确认本机公钥存在
+      ansible.builtin.stat:
+        path: "{{ local_ssh_pubkey_path }}"
+      register: local_ssh_pubkey_stat
+
+    - name: 拒绝缺失的公钥
+      ansible.builtin.fail:
+        msg: "本机公钥不存在: {{ local_ssh_pubkey_path }}"
+      when: not local_ssh_pubkey_stat.stat.exists
+
+    - name: 打印公钥指纹
+      ansible.builtin.command:
+        cmd: ssh-keygen -lf {{ local_ssh_pubkey_path }}
+      register: local_ssh_key_fingerprint
+      changed_when: false
+
+    - name: 显示将要分发的公钥
+      ansible.builtin.debug:
+        msg: >-
+          {{ local_ssh_key_fingerprint.stdout }}；
+          目标: {{ local_ssh_key_hosts }}（可用 --limit 进一步限定）
+
+- name: 将本机公钥写入目标 authorized_keys
+  hosts: "{{ local_ssh_key_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 10-add-local-ssh-key-vars.yaml
+  vars:
+    local_ssh_pubkey_content: "{{ lookup('file', local_ssh_pubkey_path) | trim }}"
+    local_ssh_key_target_user: "{{ (local_ssh_key_user | default('') | trim) or ansible_user }}"
+  pre_tasks:
+    - name: 校验本机公钥任务已启用
+      ansible.builtin.assert:
+        that:
+          - local_ssh_key_enabled | bool
+          - local_ssh_pubkey_content | length > 0
+  tasks:
+    - name: 写入登录用户 authorized_keys
+      ansible.builtin.authorized_key:
+        user: "{{ local_ssh_key_target_user }}"
+        key: "{{ local_ssh_pubkey_content }}"
+        state: present
+        manage_dir: true
+
+    - name: 写入 root authorized_keys
+      ansible.builtin.authorized_key:
+        user: root
+        key: "{{ local_ssh_pubkey_content }}"
+        state: present
+        manage_dir: true
+      when: local_ssh_key_also_root | bool
+
+    - name: 确认公钥已写入
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: authorized_keys 已更新 ({{ local_ssh_key_target_user }}{% if local_ssh_key_also_root | bool %}, root{% endif %})"
+
+- name: 从本机验证免密 SSH
+  hosts: "{{ local_ssh_key_hosts }}"
+  gather_facts: false
+  vars_files:
+    - 10-add-local-ssh-key-vars.yaml
+  tasks:
+    - name: 跳过验证
+      ansible.builtin.meta: end_play
+      when: not (local_ssh_key_verify | bool)
+
+    - name: 测试免密连接
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o BatchMode=yes
+          -o StrictHostKeyChecking=accept-new
+          -o ConnectTimeout=10
+          {{ hostvars[inventory_hostname]['ansible_user'] | default(ansible_user) }}@{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}
+          echo OK
+      delegate_to: localhost
+      become: false
+      register: local_ssh_verify
+      changed_when: false
+      failed_when: local_ssh_verify.rc != 0
+
+    - name: 打印验证结果
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ 'OK' if local_ssh_verify.rc == 0 else 'FAILED' }}"

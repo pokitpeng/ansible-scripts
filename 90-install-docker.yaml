@@ -1,0 +1,156 @@
+---
+- name: 安装并配置 Docker
+  hosts: "{{ docker_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 90-install-docker-vars.yaml
+  vars:
+    docker_static_arch: "{{ {'x86_64': 'x86_64', 'aarch64': 'aarch64'}.get(ansible_facts['architecture'], '') }}"
+    docker_archive_path: "/opt/docker-{{ docker_version }}-{{ docker_static_arch }}.tgz"
+  pre_tasks:
+    - name: 校验本机 Docker 安装配置
+      ansible.builtin.assert:
+        that:
+          - docker_install_enabled | bool
+          - ansible_facts['system'] == 'Linux'
+          - docker_static_arch | length > 0
+          - docker_source_url is match('^https://[^/]+$')
+          - docker_data_root is match('^/')
+        fail_msg: 请确认启用开关、Linux 架构、Docker 下载地址及数据目录
+
+  handlers:
+    - name: 重启 Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: 检查 Docker 是否已安装
+      ansible.builtin.command: docker --version
+      register: docker_existing
+      failed_when: false
+      changed_when: false
+      check_mode: false
+
+    - name: 检查是否为本仓库管理的静态安装
+      ansible.builtin.stat:
+        path: /opt/docker/dockerd
+      register: docker_static_dockerd
+
+    - name: 下载 Docker 静态安装包
+      ansible.builtin.get_url:
+        url: "{{ docker_source_url }}/docker-ce/linux/static/stable/{{ docker_static_arch }}/docker-{{ docker_version }}.tgz"
+        dest: "{{ docker_archive_path }}"
+        mode: "0644"
+      when: docker_existing.rc != 0
+
+    - name: 解压 Docker 到 /opt
+      ansible.builtin.unarchive:
+        src: "{{ docker_archive_path }}"
+        dest: /opt
+        remote_src: true
+        creates: /opt/docker/dockerd
+      when: docker_existing.rc != 0
+
+    - name: 创建 Docker 命令链接
+      ansible.builtin.file:
+        src: /opt/docker/docker
+        dest: /usr/local/bin/docker
+        state: link
+      when: docker_existing.rc != 0 or docker_static_dockerd.stat.exists
+
+    - name: 部署静态 Docker 的 systemd 服务
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Docker Application Container Engine
+          Documentation=https://docs.docker.com
+          After=network.target
+
+          [Service]
+          Type=notify
+          Environment="PATH=/opt/docker:/bin:/sbin:/usr/bin:/usr/sbin"
+          ExecStart=/opt/docker/dockerd
+          ExecReload=/bin/kill -s HUP $MAINPID
+          Restart=on-failure
+          RestartSec=5
+          LimitNOFILE=infinity
+          LimitNPROC=infinity
+          LimitCORE=infinity
+          TimeoutStartSec=0
+          Delegate=yes
+          KillMode=process
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: 重启 Docker
+      when: docker_existing.rc != 0 or docker_static_dockerd.stat.exists
+
+    - name: 确保 Docker 配置目录存在
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+
+    - name: 检查已有 daemon.json
+      ansible.builtin.stat:
+        path: /etc/docker/daemon.json
+      register: docker_daemon_config_stat
+
+    - name: 读取已有 daemon.json
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: docker_daemon_config_raw
+      when: docker_daemon_config_stat.stat.exists
+
+    - name: 合并 Docker daemon 配置
+      ansible.builtin.set_fact:
+        docker_daemon_config: >-
+          {{ ((docker_daemon_config_raw.content | b64decode | from_json)
+              if docker_daemon_config_stat.stat.exists else {})
+             | combine({
+                 'data-root': docker_data_root,
+                 'max-concurrent-downloads': docker_max_concurrent_downloads | int,
+                 'log-driver': 'json-file',
+                 'log-opts': {
+                   'max-size': docker_log_max_size,
+                   'max-file': docker_log_max_file
+                 },
+                 'experimental': docker_daemon_experimental | bool,
+                 'debug': docker_daemon_debug | bool,
+                 'features': {
+                   'buildkit': docker_buildkit_enabled | bool
+                 }
+               }, recursive=true) }}
+
+    - name: 部署 daemon.json
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        backup: true
+        validate: "python3 -m json.tool %s"
+        content: "{{ docker_daemon_config | to_nice_json }}\n"
+      notify: 重启 Docker
+
+    - name: 启动并启用 Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: 应用 Docker 配置
+      ansible.builtin.meta: flush_handlers
+
+    - name: 查看 Docker 版本
+      ansible.builtin.command: docker --version
+      register: docker_version_result
+      changed_when: false
+
+    - name: 显示安装结果
+      ansible.builtin.debug:
+        msg: "{{ docker_version_result.stdout }}"

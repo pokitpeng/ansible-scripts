@@ -1,0 +1,66 @@
+---
+# 配置与用法见 97-install-docker-compose-vars.yaml
+
+- name: 安装 Docker Compose 独立命令
+  hosts: "{{ docker_compose_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 97-install-docker-compose-vars.yaml
+  vars:
+    docker_compose_arch: "{{ {'x86_64': 'x86_64', 'aarch64': 'aarch64'}.get(ansible_facts['architecture'], '') }}"
+    docker_compose_download_url: >-
+      {{ docker_compose_source_url }}/releases/download/v{{ docker_compose_version }}/docker-compose-linux-{{ docker_compose_arch }}
+  pre_tasks:
+    - name: 校验本机 Docker Compose 安装配置
+      ansible.builtin.assert:
+        that:
+          - docker_compose_enabled | bool
+          - ansible_facts['system'] == 'Linux'
+          - docker_compose_arch | length > 0
+          - docker_compose_source_url is match('^https://')
+          - docker_compose_install_path is match('^/')
+          - docker_compose_sha256.get(docker_compose_arch, '') is match('^[0-9a-f]{64}$')
+        fail_msg: 请确认启用开关、Linux 架构、下载地址、安装路径及 SHA256
+
+    - name: 检查 Docker CLI 是否可用
+      ansible.builtin.command: docker --version
+      register: docker_cli_result
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: 拒绝尚未安装 Docker 的主机
+      ansible.builtin.assert:
+        that: docker_cli_result.rc == 0
+        fail_msg: 请先运行 90-install-docker.yaml 或安装 Docker CLI
+
+  tasks:
+    - name: 确保安装目录存在
+      ansible.builtin.file:
+        path: "{{ docker_compose_install_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: 下载并安装指定版本的 Docker Compose
+      ansible.builtin.get_url:
+        url: "{{ docker_compose_download_url }}"
+        dest: "{{ docker_compose_install_path }}"
+        checksum: "sha256:{{ docker_compose_sha256[docker_compose_arch] }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: 查看 Docker Compose 版本
+      ansible.builtin.command:
+        argv:
+          - "{{ docker_compose_install_path }}"
+          - version
+      register: docker_compose_version_result
+      changed_when: false
+
+    - name: 显示安装结果
+      ansible.builtin.debug:
+        msg: "{{ docker_compose_version_result.stdout }}"

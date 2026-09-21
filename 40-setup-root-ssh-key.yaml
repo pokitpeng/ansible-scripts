@@ -1,0 +1,154 @@
+---
+# 配置与用法见 40-setup-root-ssh-key-vars.yaml
+
+- name: 校验 root 免密 SSH 配置
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - 40-setup-root-ssh-key-vars.yaml
+  tags: [always, verify]
+  tasks:
+    - name: 拒绝未启用的任务
+      ansible.builtin.fail:
+        msg: >-
+          ssh_key_enabled 为 false，请在 40-setup-root-ssh-key-vars.yaml 中设为 true
+          或通过 -e ssh_key_enabled=true 启用
+      when: not (ssh_key_enabled | bool)
+
+    - name: 拒绝空的源节点
+      ansible.builtin.fail:
+        msg: 请设置 ssh_key_source_host（inventory 中的 hostname）
+      when: ssh_key_source_host | default('') | trim | length == 0
+
+    - name: 打印源节点与目标
+      ansible.builtin.debug:
+        msg: >-
+          源节点: {{ ssh_key_source_host }}；
+          目标: {{ ssh_key_target_hosts }}（可用 --limit 进一步限定）
+
+- name: 准备源节点 root SSH 密钥
+  hosts: "{{ ssh_key_source_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 40-setup-root-ssh-key-vars.yaml
+  pre_tasks:
+    - name: 校验本机 SSH 密钥任务已启用
+      ansible.builtin.assert:
+        that:
+          - ssh_key_enabled | bool
+          - ssh_key_source_host | length > 0
+  tasks:
+    - name: 确保 /root/.ssh 目录存在
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: 生成 root SSH 密钥（公钥不存在时）
+      ansible.builtin.command:
+        cmd: >-
+          ssh-keygen -t {{ ssh_key_type }}
+          {% if ssh_key_type == 'rsa' %}-b {{ ssh_key_size }}{% endif %}
+          -f {{ ssh_key_private_path }}
+          -N ""
+          -C root@{{ inventory_hostname }}
+        creates: "{{ ssh_key_public_path }}"
+
+    - name: 读取公钥内容
+      ansible.builtin.slurp:
+        src: "{{ ssh_key_public_path }}"
+      register: ssh_source_pubkey
+
+    - name: 打印公钥指纹
+      ansible.builtin.command:
+        cmd: ssh-keygen -lf {{ ssh_key_public_path }}
+      register: ssh_key_fingerprint
+      changed_when: false
+
+    - name: 显示公钥信息
+      ansible.builtin.debug:
+        msg: "{{ ssh_key_fingerprint.stdout }}"
+
+- name: 分发公钥到目标节点 root
+  hosts: "{{ ssh_key_target_hosts }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 40-setup-root-ssh-key-vars.yaml
+  vars:
+    ssh_pubkey_content: "{{ hostvars[ssh_key_source_host]['ssh_source_pubkey']['content'] | b64decode | trim }}"
+  pre_tasks:
+    - name: 校验本机 SSH 密钥任务已启用
+      ansible.builtin.assert:
+        that:
+          - ssh_key_enabled | bool
+          - ssh_key_source_host | length > 0
+  tasks:
+    - name: 跳过源节点（除非显式包含）
+      ansible.builtin.meta: end_host
+      when:
+        - inventory_hostname == ssh_key_source_host
+        - not (ssh_key_include_source | bool)
+
+    - name: 确保 root authorized_keys 目录权限
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: 写入 root authorized_keys
+      ansible.builtin.authorized_key:
+        user: root
+        key: "{{ ssh_pubkey_content }}"
+        state: present
+        manage_dir: true
+
+    - name: 确认公钥已写入
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: root authorized_keys 已更新"
+
+- name: 从源节点验证 root 免密 SSH
+  hosts: "{{ ssh_key_source_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - 40-setup-root-ssh-key-vars.yaml
+  pre_tasks:
+    - name: 校验本机 SSH 密钥任务已启用
+      ansible.builtin.assert:
+        that:
+          - ssh_key_enabled | bool
+          - ssh_key_source_host | length > 0
+  tasks:
+    - name: 跳过验证
+      ansible.builtin.meta: end_play
+      when: not (ssh_key_verify | bool)
+
+    - name: 测试到各目标的 root 免密连接
+      ansible.builtin.command:
+        cmd: >-
+          ssh -i {{ ssh_key_private_path }}
+          -o BatchMode=yes
+          -o StrictHostKeyChecking=accept-new
+          -o ConnectTimeout=10
+          root@{{ hostvars[item]['ansible_host'] | default(item) }}
+          echo OK
+      loop: "{{ query('inventory_hostnames', ssh_key_target_hosts) }}"
+      when:
+        - item != inventory_hostname or (ssh_key_include_source | bool)
+      register: ssh_verify_results
+      changed_when: false
+      failed_when: ssh_verify_results.rc != 0
+
+    - name: 打印验证结果
+      ansible.builtin.debug:
+        msg: "{{ item.item }}: {{ 'OK' if item.rc == 0 else 'FAILED' }}"
+      loop: "{{ ssh_verify_results.results | default([]) }}"
+      when: item is not skipped
+      loop_control:
+        label: "{{ item.item | default('unknown') }}"

@@ -1,0 +1,34 @@
+---
+# 用法：
+#   1. 确认已有其他更新维护方式，核对 auto_update_services，设 disable_auto_updates_enabled: true。
+#   2. ansible-playbook -i hosts.ini 70-disable-auto-updates.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 70-disable-auto-updates.yaml --limit node1
+# Ubuntu systemd 单元。执行前核对是否符合主机的更新策略。
+disable_auto_updates_enabled: true  # 设为 true 才执行
+auto_update_services:  # 要停止并禁用的 systemd 单元
+  # APT 自动更新
+  - apt-daily.timer  # 每日 APT 更新定时器
+  - apt-daily.service  # 每日 APT 更新服务
+  - apt-daily-upgrade.timer  # 每日升级定时器
+  - apt-daily-upgrade.service  # 每日升级服务
+  - unattended-upgrades  # 无人值守升级服务
+
+  # 固件更新
+  - fwupd-refresh.timer  # 固件刷新定时器
+  - fwupd-refresh.service  # 固件刷新服务
+
+  # 软件包数据库备份
+  - dpkg-db-backup.timer  # dpkg 数据库备份定时器
+  - dpkg-db-backup.service  # dpkg 数据库备份服务
+
+  # Ubuntu Advantage
+  - ua-timer.timer  # Ubuntu Advantage 定时器
+  - ua-timer.service  # Ubuntu Advantage 服务
+
+  # man-db 缓存更新
+  - man-db.timer  # 手册页缓存更新定时器
+  - man-db.service  # 手册页缓存更新服务
+
+  # 更新通知
+  - update-notifier-download.timer  # 更新通知下载定时器
+  - update-notifier-download.service  # 更新通知下载服务
