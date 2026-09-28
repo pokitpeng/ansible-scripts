@@ -1,0 +1,25 @@
+---
+# 用法：
+#   安装：
+#   1. 核对版本、下载源和 npm 源，设 nodejs_enabled: true、nodejs_action: install。
+#   2. ansible-playbook -i hosts.ini 76-install-nodejs.yaml --list-hosts
+#   3. ansible-playbook -i hosts.ini 76-install-nodejs.yaml --limit node1
+#   卸载：设 nodejs_action: uninstall。只删除 /usr/local/node、本剧本创建的 PATH 链接，
+#   以及该链接指向的解压目录。默认保留安装包；nodejs_remove_cache: true 时一并删除 nodejs_cache_dir。
+# 安装包默认走阿里云。也可改为：
+#   https://mirrors.cloud.tencent.com/nodejs-release
+#   https://npmmirror.com/mirrors/node
+#   https://nodejs.org/dist
+# npm 源留空则不写 registry。nodejs_sha256 留空则不校验；填写时必须对应当前 nodejs_version。
+nodejs_enabled: true  # 设为 true 才执行
+nodejs_action: install  # install 或 uninstall
+nodejs_remove_cache: false  # uninstall 时是否删除 nodejs_cache_dir
+nodejs_hosts: servers  # 目标主机组或主机名
+nodejs_version: "24.21.0"  # Node.js 版本，不含 v 前缀；默认当前 Active LTS
+nodejs_source_url: https://mirrors.aliyun.com/nodejs-release  # 安装包镜像根地址，不含末尾斜杠
+nodejs_cache_dir: /opt/nodejs  # 安装包和解压缓存目录
+nodejs_npm_registry: https://registry.npmmirror.com  # npm 源；留空则不修改
+# 官方 npm：https://registry.npmjs.org
+nodejs_sha256:  # 当前版本安装包校验值；留空则不校验
+  x64: ""  # x86_64 文件
+  arm64: ""  # aarch64 文件

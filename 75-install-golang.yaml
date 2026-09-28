@@ -1,0 +1,212 @@
+---
+# 配置与用法见 75-install-golang-vars.yaml
+
+- name: 安装或卸载 Go
+  hosts: "{{ golang_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 75-install-golang-vars.yaml
+  vars:
+    golang_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], '') }}"
+    golang_archive_name: "go{{ golang_version }}.linux-{{ golang_arch }}.tar.gz"
+  pre_tasks:
+    - name: 校验 Go 公共配置
+      ansible.builtin.assert:
+        that:
+          - golang_enabled | bool
+          - ansible_facts['system'] == 'Linux'
+          - golang_action in ['install', 'uninstall']
+        fail_msg: 请确认启用开关和 Linux 系统；golang_action 只能是 install 或 uninstall
+
+    - name: 校验 Go 安装配置
+      ansible.builtin.assert:
+        that:
+          - golang_arch | length > 0
+          - golang_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - golang_source_url is match('^https://')
+          - golang_cache_dir is match('^/')
+          - (golang_sha256 | default({})).get(golang_arch, '') | trim | length == 0 or (golang_sha256 | default({})).get(golang_arch, '') is match('^[0-9a-f]{64}$')
+        fail_msg: 请确认 Linux 架构、版本和下载地址；SHA256 留空或为 64 位十六进制
+      when: golang_action == 'install'
+
+    - name: 校验 Go 卸载配置
+      ansible.builtin.assert:
+        that:
+          - golang_cache_dir is match('^/[^/]+/.+')
+          - golang_cache_dir is not match('^/(bin|boot|dev|etc|home|lib|lib64|media|mnt|opt|proc|root|run|sbin|srv|sys|tmp|usr|var|usr/local)/*$')
+        fail_msg: golang_remove_cache 为 true 时，golang_cache_dir 必须是至少两级的绝对路径，且不能是系统目录
+      when:
+        - golang_action == 'uninstall'
+        - golang_remove_cache | bool
+
+    - name: 读取已安装的 Go 版本
+      ansible.builtin.command: /usr/local/go/bin/go version
+      register: golang_current
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: golang_action == 'install'
+
+    - name: 判断是否需要安装或更新 Go
+      ansible.builtin.set_fact:
+        golang_install_needed: >-
+          {{ golang_current.rc != 0 or ('go' ~ golang_version ~ ' ') not in golang_current.stdout }}
+      when: golang_action == 'install'
+
+  tasks:
+    - name: 预览 Go 安装计划
+      ansible.builtin.debug:
+        msg: >-
+          目标 go{{ golang_version }}（{{ golang_arch }}），源 {{ golang_source_url }}。
+          {{ '需要安装或更新' if golang_install_needed else '版本已一致，无需安装' }}。
+      when:
+        - golang_action == 'install'
+        - ansible_check_mode
+
+    - name: 下载并解压 Go
+      when:
+        - golang_action == 'install'
+        - golang_install_needed | bool
+        - not ansible_check_mode
+      block:
+        - name: 创建 Go 安装包缓存目录
+          ansible.builtin.file:
+            path: "{{ golang_cache_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 下载 Go 安装包
+          ansible.builtin.get_url:
+            url: "{{ golang_source_url }}/{{ golang_archive_name }}"
+            dest: "{{ golang_cache_dir }}/{{ golang_archive_name }}"
+            checksum: "{{ ('sha256:' ~ golang_sha256[golang_arch]) if (golang_sha256 | default({})).get(golang_arch, '') | trim | length > 0 else omit }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 移除旧的 Go 安装目录
+          ansible.builtin.file:
+            path: /usr/local/go
+            state: absent
+
+        - name: 解压 Go 到 /usr/local
+          ansible.builtin.unarchive:
+            src: "{{ golang_cache_dir }}/{{ golang_archive_name }}"
+            dest: /usr/local
+            remote_src: true
+            owner: root
+            group: root
+
+    - name: 链接 go 与 gofmt 到默认 PATH
+      ansible.builtin.file:
+        src: "/usr/local/go/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+      loop:
+        - go
+        - gofmt
+      when:
+        - golang_action == 'install'
+        - not ansible_check_mode
+
+    - name: 写入 Go 模块代理
+      ansible.builtin.copy:
+        dest: /etc/profile.d/ansible-golang.sh
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by 75-install-golang.yaml
+          {% if golang_goproxy | trim | length > 0 %}
+          export GOPROXY={{ golang_goproxy | quote }}
+          {% endif %}
+          {% if golang_gosumdb | trim | length > 0 %}
+          export GOSUMDB={{ golang_gosumdb | quote }}
+          {% endif %}
+      when:
+        - golang_action == 'install'
+        - not ansible_check_mode
+        - (golang_goproxy | trim | length > 0) or (golang_gosumdb | trim | length > 0)
+
+    - name: 检查 Go 版本
+      ansible.builtin.command: /usr/local/go/bin/go version
+      register: golang_version_result
+      changed_when: false
+      failed_when: >-
+        golang_version_result.rc != 0 or
+        ('go' ~ golang_version ~ ' ') not in golang_version_result.stdout
+      when:
+        - golang_action == 'install'
+        - not ansible_check_mode
+
+    - name: 显示 Go 安装结果
+      ansible.builtin.debug:
+        msg: "{{ golang_version_result.stdout }}；重新登录以加载 GOPROXY/GOSUMDB。"
+      when:
+        - golang_action == 'install'
+        - not ansible_check_mode
+
+    - name: 卸载 Go
+      when: golang_action == 'uninstall'
+      block:
+        - name: 检查默认 PATH 中的 Go 链接
+          ansible.builtin.stat:
+            path: "/usr/local/bin/{{ item }}"
+          loop:
+            - go
+            - gofmt
+          register: golang_bin_links
+
+        - name: 记录本剧本创建的 Go 链接
+          ansible.builtin.set_fact:
+            golang_managed_links: "{{ golang_managed_links | default([]) + [item.item] }}"
+          loop: "{{ golang_bin_links.results }}"
+          when:
+            - item.stat.islnk | default(false)
+            - (item.stat.lnk_target | default('')) == ('/usr/local/go/bin/' ~ item.item) or (item.stat.lnk_source | default('')) == ('/usr/local/go/bin/' ~ item.item)
+
+        - name: 预览 Go 卸载计划
+          ansible.builtin.debug:
+            msg: >-
+              将删除 /usr/local/go 与 /etc/profile.d/ansible-golang.sh。
+              PATH 链接：{{ (golang_managed_links | default([])) | join('、') if (golang_managed_links | default([])) | length > 0 else '无本剧本创建的链接' }}。
+              {{ '同时删除缓存 ' ~ golang_cache_dir if golang_remove_cache | bool else '保留缓存 ' ~ golang_cache_dir }}。
+          when: ansible_check_mode
+
+        - name: 移除本剧本创建的 Go 链接
+          ansible.builtin.file:
+            path: "/usr/local/bin/{{ item }}"
+            state: absent
+          loop: "{{ golang_managed_links | default([]) }}"
+          when: not ansible_check_mode
+
+        - name: 移除 Go 安装目录
+          ansible.builtin.file:
+            path: /usr/local/go
+            state: absent
+          when: not ansible_check_mode
+
+        - name: 移除 Go 环境变量脚本
+          ansible.builtin.file:
+            path: /etc/profile.d/ansible-golang.sh
+            state: absent
+          when: not ansible_check_mode
+
+        - name: 移除 Go 安装包缓存
+          ansible.builtin.file:
+            path: "{{ golang_cache_dir }}"
+            state: absent
+          when:
+            - golang_remove_cache | bool
+            - not ansible_check_mode
+
+        - name: 显示 Go 卸载结果
+          ansible.builtin.debug:
+            msg: >-
+              已处理 /usr/local/go、本剧本的 PATH 链接和 /etc/profile.d/ansible-golang.sh。
+              {{ '已删除缓存 ' ~ golang_cache_dir if golang_remove_cache | bool else '已保留缓存 ' ~ golang_cache_dir }}。
+              重新登录后，已打开的 shell 才会丢掉 GOPROXY/GOSUMDB。
+          when: not ansible_check_mode

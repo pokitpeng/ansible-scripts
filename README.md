@@ -31,6 +31,8 @@
 | 50（按需） | `50-configure-dns.yaml` | 需要修改 Ubuntu netplan DNS 时执行，尤其应在下载 Docker 前确认解析可用。先确认 `configure_dns_netplan_file`（cloud-init 常见为 `50-cloud-init.yaml`）；远端需有 `python3-yaml`，验证需有 `dig`。改动网络配置可能中断当前连接。 |
 | 60（按需） | `60-sysctl.yaml` | 写入需要的内核参数；只配置本机实际需要的参数。 |
 | 70（按需） | `70-disable-auto-updates.yaml` | 仅在已有其他更新维护方式时关闭 APT、固件刷新、系统维护及更新通知单元；不存在的单元会跳过。 |
+| 75（按需） | `75-install-golang.yaml` | 安装或卸载官方 Go 二进制（`/usr/local/go`）。`golang_action` 为 `install` 或 `uninstall`。安装默认从阿里云下载，并写入 `GOPROXY`/`GOSUMDB`。卸载只删除本剧本创建的目录、PATH 链接和环境脚本，默认保留安装包缓存。`golang_sha256` 留空则不校验；填写时须与版本一致。 |
+| 76（按需） | `76-install-nodejs.yaml` | 安装或卸载 Node.js Active LTS 二进制。`nodejs_action` 为 `install` 或 `uninstall`。安装后链接到 `/usr/local/bin`，默认从阿里云下载，npm 使用 npmmirror。卸载只删除本剧本创建的 `/usr/local/node`、PATH 链接和对应解压目录，默认保留安装包。`nodejs_sha256` 留空则不校验；填写时须与版本一致。 |
 | 80（按需） | `80-init-nvme-disks.yaml` | 确认盘符和数据后初始化、挂载空 NVMe 盘；需要 `ansible.posix` 集合。若 Docker 的 `data-root` 在此盘上，必须先完成挂载。 |
 | 85（按需） | `85-install-nvidia-driver.yaml` | Ubuntu 22.04/24.04 x86_64 通过 cuda-keyring 注册 NVIDIA 网络源，锁定 615 分支并安装 nvidia-open；安装有改动后手动重启。 |
 | 87（按需） | `87-install-cuda-toolkit.yaml` | Ubuntu 22.04/24.04 x86_64 通过 cuda-keyring 网络源安装 CUDA Toolkit 13.4（可配置），设置登录 shell 的 CUDA_HOME/PATH；需要在宿主机编译 CUDA 时执行。 |

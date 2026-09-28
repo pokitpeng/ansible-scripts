@@ -1,0 +1,267 @@
+---
+# 配置与用法见 76-install-nodejs-vars.yaml
+
+- name: 安装或卸载 Node.js
+  hosts: "{{ nodejs_hosts }}"
+  become: true
+  gather_facts: true
+  vars_files:
+    - 76-install-nodejs-vars.yaml
+  vars:
+    nodejs_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], '') }}"
+    nodejs_archive_name: "node-v{{ nodejs_version }}-linux-{{ nodejs_arch }}.tar.gz"
+    nodejs_extract_dir: "{{ nodejs_cache_dir }}/node-v{{ nodejs_version }}-linux-{{ nodejs_arch }}"
+  pre_tasks:
+    - name: 校验 Node.js 公共配置
+      ansible.builtin.assert:
+        that:
+          - nodejs_enabled | bool
+          - ansible_facts['system'] == 'Linux'
+          - nodejs_action in ['install', 'uninstall']
+        fail_msg: 请确认启用开关和 Linux 系统；nodejs_action 只能是 install 或 uninstall
+
+    - name: 校验 Node.js 安装配置
+      ansible.builtin.assert:
+        that:
+          - nodejs_arch | length > 0
+          - nodejs_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - nodejs_source_url is match('^https://')
+          - nodejs_cache_dir is match('^/')
+          - (nodejs_sha256 | default({})).get(nodejs_arch, '') | trim | length == 0 or (nodejs_sha256 | default({})).get(nodejs_arch, '') is match('^[0-9a-f]{64}$')
+        fail_msg: 请确认 Linux 架构、版本和下载地址；SHA256 留空或为 64 位十六进制
+      when: nodejs_action == 'install'
+
+    - name: 校验 Node.js 卸载配置
+      ansible.builtin.assert:
+        that:
+          - nodejs_cache_dir is match('^/[^/]+/.+')
+          - nodejs_cache_dir is not match('^/(bin|boot|dev|etc|home|lib|lib64|media|mnt|opt|proc|root|run|sbin|srv|sys|tmp|usr|var|usr/local)/*$')
+        fail_msg: 卸载时 nodejs_cache_dir 必须是至少两级的绝对路径，且不能是系统目录
+      when: nodejs_action == 'uninstall'
+
+    - name: 读取已安装的 Node.js 版本
+      ansible.builtin.command: /usr/local/node/bin/node --version
+      register: nodejs_current
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: nodejs_action == 'install'
+
+    - name: 判断是否需要安装或更新 Node.js
+      ansible.builtin.set_fact:
+        nodejs_install_needed: >-
+          {{ nodejs_current.rc != 0 or nodejs_current.stdout | trim != 'v' ~ nodejs_version }}
+      when: nodejs_action == 'install'
+
+  tasks:
+    - name: 预览 Node.js 安装计划
+      ansible.builtin.debug:
+        msg: >-
+          目标 v{{ nodejs_version }}（{{ nodejs_arch }}），源 {{ nodejs_source_url }}。
+          {{ '需要安装或更新' if nodejs_install_needed else '版本已一致，无需安装' }}。
+      when:
+        - nodejs_action == 'install'
+        - ansible_check_mode
+
+    - name: 下载并解压 Node.js
+      when:
+        - nodejs_action == 'install'
+        - nodejs_install_needed | bool
+        - not ansible_check_mode
+      block:
+        - name: 创建 Node.js 缓存目录
+          ansible.builtin.file:
+            path: "{{ nodejs_cache_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: 下载 Node.js 安装包
+          ansible.builtin.get_url:
+            url: "{{ nodejs_source_url }}/v{{ nodejs_version }}/{{ nodejs_archive_name }}"
+            dest: "{{ nodejs_cache_dir }}/{{ nodejs_archive_name }}"
+            checksum: "{{ ('sha256:' ~ nodejs_sha256[nodejs_arch]) if (nodejs_sha256 | default({})).get(nodejs_arch, '') | trim | length > 0 else omit }}"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: 解压 Node.js
+          ansible.builtin.unarchive:
+            src: "{{ nodejs_cache_dir }}/{{ nodejs_archive_name }}"
+            dest: "{{ nodejs_cache_dir }}"
+            remote_src: true
+            owner: root
+            group: root
+            creates: "{{ nodejs_extract_dir }}/bin/node"
+
+    - name: 链接当前 Node.js 版本
+      ansible.builtin.file:
+        src: "{{ nodejs_extract_dir }}"
+        dest: /usr/local/node
+        state: link
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+
+    - name: 链接 node、npm、npx、corepack 到默认 PATH
+      ansible.builtin.file:
+        src: "/usr/local/node/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+      loop:
+        - node
+        - npm
+        - npx
+        - corepack
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+
+    - name: 创建 npm 全局配置目录
+      ansible.builtin.file:
+        path: /usr/local/node/etc
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+        - nodejs_npm_registry | trim | length > 0
+
+    - name: 写入 npm 源
+      ansible.builtin.copy:
+        dest: /usr/local/node/etc/npmrc
+        owner: root
+        group: root
+        mode: "0644"
+        content: "registry={{ nodejs_npm_registry }}\n"
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+        - nodejs_npm_registry | trim | length > 0
+
+    - name: 检查 Node.js 版本
+      ansible.builtin.command: /usr/local/node/bin/node --version
+      register: nodejs_version_result
+      changed_when: false
+      failed_when: nodejs_version_result.stdout | trim != 'v' ~ nodejs_version
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+
+    - name: 检查 npm 全局源
+      ansible.builtin.command:
+        argv: [/usr/local/node/bin/npm, config, get, registry, --location=global]
+      register: nodejs_npm_registry_result
+      changed_when: false
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+        - nodejs_npm_registry | trim | length > 0
+
+    - name: 确认 npm 源已生效
+      ansible.builtin.assert:
+        that: >-
+          nodejs_npm_registry_result.stdout | trim | regex_replace('/$', '')
+          == nodejs_npm_registry | trim | regex_replace('/$', '')
+        fail_msg: "npm 全局源不是 {{ nodejs_npm_registry }}：{{ nodejs_npm_registry_result.stdout | trim }}"
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+        - nodejs_npm_registry | trim | length > 0
+
+    - name: 显示 Node.js 安装结果
+      ansible.builtin.debug:
+        msg: >-
+          {{ nodejs_version_result.stdout }}
+          {% if nodejs_npm_registry | trim | length > 0 %}；npm registry={{ nodejs_npm_registry_result.stdout | trim }}{% endif %}
+      when:
+        - nodejs_action == 'install'
+        - not ansible_check_mode
+
+    - name: 卸载 Node.js
+      when: nodejs_action == 'uninstall'
+      block:
+        - name: 检查 /usr/local/node
+          ansible.builtin.stat:
+            path: /usr/local/node
+          register: nodejs_home_link
+
+        - name: 检查默认 PATH 中的 Node.js 链接
+          ansible.builtin.stat:
+            path: "/usr/local/bin/{{ item }}"
+          loop:
+            - node
+            - npm
+            - npx
+            - corepack
+          register: nodejs_bin_links
+
+        - name: 记录本剧本的 Node.js 安装目录
+          ansible.builtin.set_fact:
+            nodejs_managed_home: >-
+              {{
+                nodejs_home_link.stat.lnk_source
+                if (nodejs_home_link.stat.lnk_source | default('')).startswith(nodejs_cache_dir ~ '/')
+                else nodejs_home_link.stat.lnk_target
+              }}
+          when:
+            - nodejs_home_link.stat.islnk | default(false)
+            - (nodejs_home_link.stat.lnk_source | default('')).startswith(nodejs_cache_dir ~ '/') or (nodejs_home_link.stat.lnk_target | default('')).startswith(nodejs_cache_dir ~ '/')
+
+        - name: 记录本剧本创建的 Node.js 链接
+          ansible.builtin.set_fact:
+            nodejs_managed_links: "{{ nodejs_managed_links | default([]) + [item.item] }}"
+          loop: "{{ nodejs_bin_links.results }}"
+          when:
+            - nodejs_managed_home | default('') | length > 0
+            - item.stat.islnk | default(false)
+            - (item.stat.lnk_target | default('')) == ('/usr/local/node/bin/' ~ item.item) or (item.stat.lnk_source | default('')) == ('/usr/local/node/bin/' ~ item.item)
+
+        - name: 预览 Node.js 卸载计划
+          ansible.builtin.debug:
+            msg: >-
+              将删除 /usr/local/node{{ '（安装目录 ' ~ nodejs_managed_home ~ '）' if nodejs_managed_home | default('') | length > 0 else '（不是指向缓存目录的链接，将跳过）' }}。
+              PATH 链接：{{ (nodejs_managed_links | default([])) | join('、') if (nodejs_managed_links | default([])) | length > 0 else '无本剧本创建的链接' }}。
+              {{ '同时删除缓存 ' ~ nodejs_cache_dir if nodejs_remove_cache | bool else '保留安装包缓存 ' ~ nodejs_cache_dir }}。
+          when: ansible_check_mode
+
+        - name: 移除本剧本创建的 Node.js 链接
+          ansible.builtin.file:
+            path: "/usr/local/bin/{{ item }}"
+            state: absent
+          loop: "{{ nodejs_managed_links | default([]) }}"
+          when: not ansible_check_mode
+
+        - name: 移除 /usr/local/node 链接
+          ansible.builtin.file:
+            path: /usr/local/node
+            state: absent
+          when:
+            - not ansible_check_mode
+            - nodejs_managed_home | default('') | length > 0
+
+        - name: 移除 Node.js 安装目录
+          ansible.builtin.file:
+            path: "{{ nodejs_managed_home }}"
+            state: absent
+          when:
+            - not ansible_check_mode
+            - nodejs_managed_home | default('') | length > 0
+
+        - name: 移除 Node.js 安装包缓存
+          ansible.builtin.file:
+            path: "{{ nodejs_cache_dir }}"
+            state: absent
+          when:
+            - nodejs_remove_cache | bool
+            - not ansible_check_mode
+
+        - name: 显示 Node.js 卸载结果
+          ansible.builtin.debug:
+            msg: >-
+              已处理 /usr/local/node、本剧本的 PATH 链接{{ '和安装目录 ' ~ nodejs_managed_home if nodejs_managed_home | default('') | length > 0 else '' }}。
+              {{ '已删除缓存 ' ~ nodejs_cache_dir if nodejs_remove_cache | bool else '已保留安装包缓存 ' ~ nodejs_cache_dir }}。
+          when: not ansible_check_mode
